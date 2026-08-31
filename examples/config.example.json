@@ -1,0 +1,106 @@
+{
+  "model_roots": [
+    {
+      "path": "/opt/models/gguf",
+      "kind": "gguf",
+      "enabled": true
+    },
+    {
+      "path": "/opt/models/gguf",
+      "kind": "gguf",
+      "enabled": true
+    },
+    {
+      "path": "/opt/models/hf/hub",
+      "kind": "hf",
+      "enabled": true
+    }
+  ],
+  "engines": [
+    {
+      "kind": "unit",
+      "name": "ds4-server.service",
+      "label": null,
+      "port": 8000,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "docker",
+      "name": "qwen38-4bit",
+      "label": null,
+      "port": 8002,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "unit",
+      "name": "llama-server.service",
+      "label": null,
+      "port": 8888,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "unit",
+      "name": "llama-server-35b.service",
+      "label": null,
+      "port": 8889,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "unit",
+      "name": "llama-step-3.7-flash.service",
+      "label": null,
+      "port": 8890,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "unit",
+      "name": "llama-server-35b-nail.service",
+      "label": null,
+      "port": 8889,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "docker",
+      "name": "vllm-server",
+      "label": null,
+      "port": 8000,
+      "model": null,
+      "enabled": true
+    },
+    {
+      "kind": "unit",
+      "name": "sglang-qwen3.8-27b.service",
+      "label": null,
+      "port": 30000,
+      "model": null,
+      "enabled": true
+    }
+  ],
+  "cost": {
+    "enabled": true,
+    "usd_per_kwh": 0.3,
+    "skus": [
+      {
+        "name": "Ultra cloud",
+        "in_price": 5.0,
+        "out_price": 25.0
+      },
+      {
+        "name": "Mid cloud",
+        "in_price": 3.0,
+        "out_price": 15.0
+      },
+      {
+        "name": "Low cloud",
+        "in_price": 0.4,
+        "out_price": 1.6
+      }
+    ]
+  }
+}

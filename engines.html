@@ -1,0 +1,945 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gx10 engines</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+/* ── base (single Grafana-dark theme — metrics design system) ─── */
+*{box-sizing:border-box;margin:0}
+html{
+  --bg:#0b0f14;--bg2:#111827;
+  --card:#141a22;--card2:#1a2332;--card-edge:#2a3344;
+  --txt:#e5e9f0;--dim:#9aa3b2;
+  --acc:#22c55e;--acc2:#60a5fa;
+  --ok:#22c55e;--warn:#eab308;--bad:#ef4444;
+  --glow:0;--radius:10px;--shadow:none;
+  --font-ui:'Segoe UI',system-ui,-apple-system,sans-serif;
+  --font-data:ui-monospace,'Cascadia Mono',Menlo,Consolas,monospace;
+  color-scheme:dark}
+html,body{height:100%}
+body{
+  background:linear-gradient(180deg,var(--bg) 0%,var(--bg2) 100%) fixed;
+  color:var(--txt);
+  font:13px/1.5 var(--font-ui);
+  padding:14px 16px 12px;
+}
+header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+.brand{font-size:16px;font-weight:700;letter-spacing:.4px;display:flex;align-items:center;gap:9px;white-space:nowrap}
+.brand b{color:#4ade80;font-weight:800}
+.tabs{display:flex;gap:5px}
+.tab{font-size:11.5px;padding:4px 12px;border-radius:16px;border:1px solid var(--card-edge);
+  color:var(--dim);text-decoration:none;letter-spacing:.3px;transition:all .2s}
+.tab:hover{color:var(--txt)}
+.tab.on{color:#4ade80;border-color:color-mix(in srgb,var(--ok) 45%,transparent);
+  background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ok);
+  border:1px solid color-mix(in srgb,var(--ok) 40%,transparent);border-radius:16px;padding:2px 10px;white-space:nowrap}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:pulse 2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 45%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+/* base components (part 14 — restored; dropped by the part-12 restyle) */
+.card{background:var(--card);border:1px solid var(--card-edge);border-radius:var(--radius);
+  padding:16px 18px;min-width:0}
+.card+.card{margin-top:16px}
+.card h2{font-size:10.5px;text-transform:uppercase;letter-spacing:1.6px;color:var(--dim);
+  display:flex;align-items:center;gap:9px;margin-bottom:12px;font-weight:600;flex-wrap:wrap}
+.pill{font-size:10px;font-family:var(--font-data);padding:2.5px 9px;border-radius:20px;
+  border:1px solid var(--card-edge);color:var(--dim);letter-spacing:.4px;white-space:nowrap}
+.pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent);
+  background:color-mix(in srgb,var(--warn) 8%,transparent)}
+.mono{font-family:var(--font-data)}
+.k{color:var(--dim);font-size:11px}
+/* state pill (part 15 — was unstyled plain text; colors encode state) */
+.st{font-size:10px;font-family:var(--font-data);padding:2px 9px;border-radius:12px;
+  border:1px solid var(--card-edge);color:var(--dim);letter-spacing:.4px;white-space:nowrap;flex:none}
+.st.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent);
+  background:color-mix(in srgb,var(--ok) 8%,transparent)}
+.st.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,transparent);
+  background:color-mix(in srgb,var(--bad) 8%,transparent)}
+.st.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent);
+  background:color-mix(in srgb,var(--warn) 8%,transparent)}
+/* ── budget bar ───────────────────────────────────────────── */
+.budget{display:flex;flex-direction:column;gap:9px}
+.budget-top{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.budget-top .big{font-size:26px;font-weight:700;font-family:var(--font-data);
+  text-shadow:0 0 calc(14px*var(--glow)) color-mix(in srgb,var(--acc) 35%,transparent)}
+.budget-top .big small{font-size:12px;color:var(--dim);font-weight:400}
+.umabar{height:14px;border-radius:8px;background:color-mix(in srgb,var(--txt) 7%,transparent);
+  overflow:hidden;display:flex;box-shadow:inset 0 1px 3px rgba(0,0,0,.35)}
+.umabar i{display:block;height:100%;transition:width 1s cubic-bezier(.4,0,.2,1)}
+.umabar .gpu{background:linear-gradient(90deg,var(--acc),var(--acc2));width:0;
+  box-shadow:0 0 calc(10px*var(--glow)) color-mix(in srgb,var(--acc) 55%,transparent)}
+.umabar.warn .gpu{background:linear-gradient(90deg,var(--warn),var(--bad));
+  box-shadow:0 0 calc(10px*var(--glow)) color-mix(in srgb,var(--warn) 55%,transparent)}
+.umabar .free{background:transparent;flex:1}
+.budget-rows{display:flex;flex-direction:column;gap:5px}
+.brow{display:flex;align-items:center;gap:10px;font-size:12.5px;cursor:pointer;
+  padding:6px 10px;border-radius:9px;transition:background .15s,border-color .15s;
+  border:1px solid transparent}
+.brow:hover{background:color-mix(in srgb,var(--acc) 7%,transparent);
+  border-color:color-mix(in srgb,var(--acc) 22%,transparent)}
+.brow .dot{width:8px;height:8px;border-radius:50%;background:#55607a;flex:none}
+.brow .dot.ok{background:var(--ok);box-shadow:0 0 8px color-mix(in srgb,var(--ok) 60%,transparent)}
+.brow .dot.bad{background:var(--bad);box-shadow:0 0 8px color-mix(in srgb,var(--bad) 60%,transparent)}
+.brow .nm{font-weight:600;flex:none;overflow-wrap:anywhere;font-family:var(--font-data)}
+.brow .sub{color:var(--dim);font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brow .val{font-family:var(--font-data);font-weight:600}
+.brow.off{opacity:.55}
+.brow.off .val{color:var(--dim);font-weight:400}
+
+/* ── fleet grid ───────────────────────────────────────────── */
+.fleet{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;margin-top:14px}
+.fcard{cursor:pointer;position:relative;overflow:hidden;animation:rise .45s both}
+.fcard:nth-child(1){animation-delay:.04s}.fcard:nth-child(2){animation-delay:.08s}
+.fcard:nth-child(3){animation-delay:.12s}.fcard:nth-child(4){animation-delay:.16s}
+.fcard:nth-child(5){animation-delay:.2s}.fcard:nth-child(6){animation-delay:.24s}
+.fcard:nth-child(7){animation-delay:.28s}.fcard:nth-child(8){animation-delay:.32s}
+.fcard::before{content:"";position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:3px;
+  background:#55607a;transition:background .3s,box-shadow .3s}
+.fcard:hover{transform:translateY(-3px);
+  border-color:color-mix(in srgb,var(--acc) 45%,transparent);
+  box-shadow:var(--shadow),0 0 calc(26px*var(--glow)) color-mix(in srgb,var(--acc) 14%,transparent)}
+.fcard.ok::before{background:var(--ok);box-shadow:0 0 calc(8px*var(--glow)) color-mix(in srgb,var(--ok) 60%,transparent)}
+.fcard.bad::before{background:var(--bad);box-shadow:0 0 calc(8px*var(--glow)) color-mix(in srgb,var(--bad) 60%,transparent)}
+.fcard.warn::before{background:var(--warn);box-shadow:0 0 calc(8px*var(--glow)) color-mix(in srgb,var(--warn) 60%,transparent)}
+/* part 15 — header: full-width name (2-line clamp), then a tag row:
+   type pill left, state pill right. Never overflows at any column count. */
+.fcard-head{padding-left:8px;margin-bottom:9px;min-width:0}
+.fcard-head .nm{font-size:15px;font-weight:700;font-family:var(--font-data);
+  line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word}
+.fcard-tags{display:flex;align-items:center;gap:8px;margin-top:7px}
+.fcard-tags .type{font-size:10px;padding:2.5px 9px;border-radius:12px;flex:none;
+  border:1px solid var(--card-edge);color:var(--dim);letter-spacing:1px;text-transform:uppercase;white-space:nowrap}
+.fcard-tags .type.llama{color:var(--acc2);border-color:color-mix(in srgb,var(--acc2) 40%,transparent);
+  background:color-mix(in srgb,var(--acc2) 8%,transparent)}
+.fcard-tags .type.sglang{color:#c084fc;border-color:color-mix(in srgb,#c084fc 40%,transparent);
+  background:color-mix(in srgb,#c084fc 8%,transparent)}
+/* python/fork/atomic/unknown backends share the neutral llama treatment */
+.fcard-tags .type.python,.fcard-tags .type.fork,.fcard-tags .type.atomic{
+  color:var(--dim);border-color:var(--card-edge);background:color-mix(in srgb,var(--txt) 4%,transparent)}
+.fcard-tags .type.vllm{color:#fb923c;border-color:color-mix(in srgb,#fb923c 40%,transparent);
+  background:color-mix(in srgb,#fb923c 8%,transparent)}
+.fcard-tags .type.ds4{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent);
+  background:color-mix(in srgb,var(--ok) 8%,transparent)}
+.fcard-tags .st{margin-left:auto}
+.fcard .mdl{font-size:12px;color:var(--txt);font-family:var(--font-data);margin-bottom:7px;padding-left:8px;
+  overflow-wrap:anywhere}
+/* part 15 — sub line is wrapping chips, not one dense string */
+.fcard .sub{font-size:11.5px;color:var(--dim);padding-left:8px;display:flex;flex-wrap:wrap;gap:3px 0;line-height:1.6}
+.fcard .sub b{color:var(--txt);font-weight:600}
+.fcard .sub .sep{opacity:.45;margin:0 6px}
+.fcard .sub .chip{white-space:nowrap}
+.fcard .sub .chip-bad{color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 40%,transparent);
+  border-radius:8px;padding:0 6px;background:color-mix(in srgb,var(--bad) 7%,transparent)}
+
+/* ── detail ───────────────────────────────────────────────── */
+#detail{display:none;margin-top:16px;animation:rise .4s both}
+.dhead{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px;padding:14px 18px;
+  background:var(--card);border:1px solid var(--card-edge);border-radius:var(--radius);
+  box-shadow:var(--shadow);backdrop-filter:blur(8px);position:relative;overflow:hidden}
+.dhead::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;
+  background:linear-gradient(90deg,var(--acc),var(--acc2) 45%,transparent);opacity:.7}
+.dhead .back{font-size:12px;color:var(--dim);cursor:pointer;padding:5px 12px;border:1px solid var(--card-edge);
+  border-radius:20px;transition:all .2s;background:transparent}
+.dhead .back:hover{color:var(--txt);border-color:var(--txt);background:color-mix(in srgb,var(--txt) 6%,transparent)}
+.dhead .nm{font-size:20px;font-weight:700;font-family:var(--font-data);
+  text-shadow:0 0 calc(16px*var(--glow)) color-mix(in srgb,var(--acc) 40%,transparent)}
+.dhead .acts{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+.btn{font-size:12px;padding:6px 15px;border-radius:20px;border:1px solid var(--card-edge);
+  color:var(--txt);background:transparent;cursor:pointer;font-family:var(--font-ui);letter-spacing:.3px;transition:all .15s}
+.btn:hover{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 8%,transparent)}
+.btn.pri{background:color-mix(in srgb,var(--acc) 16%,transparent);border-color:color-mix(in srgb,var(--acc) 50%,transparent);color:var(--acc)}
+.btn.pri:hover{box-shadow:0 0 calc(14px*var(--glow)) color-mix(in srgb,var(--acc) 40%,transparent)}
+.btn.danger:hover{border-color:var(--bad);color:var(--bad);background:color-mix(in srgb,var(--bad) 8%,transparent)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.dtabs{display:flex;gap:6px;margin-bottom:12px}
+.dtab{font-size:12px;padding:6px 16px;border-radius:20px;border:1px solid var(--card-edge);color:var(--dim);
+  cursor:pointer;background:transparent;font-family:var(--font-ui);transition:all .2s}
+.dtab:hover{color:var(--txt);border-color:color-mix(in srgb,var(--txt) 40%,transparent)}
+.dtab.on{color:var(--acc);border-color:color-mix(in srgb,var(--acc) 50%,transparent);
+  background:color-mix(in srgb,var(--acc) 10%,transparent);
+  box-shadow:0 0 calc(12px*var(--glow)) color-mix(in srgb,var(--acc) 20%,transparent)}
+.pane{display:none}
+.pane.on{display:block;animation:rise .3s both}
+
+/* parameter rows */
+.ptable{display:flex;flex-direction:column;gap:8px}
+.prow{display:grid;grid-template-columns:200px 1fr auto;gap:12px;align-items:center;
+  padding:10px 12px;border:1px solid var(--card-edge);border-radius:10px;
+  background:color-mix(in srgb,var(--txt) 2%,transparent);transition:border-color .2s,background .2s}
+.prow:hover{border-color:color-mix(in srgb,var(--acc) 30%,transparent);
+  background:color-mix(in srgb,var(--acc) 4%,transparent)}
+.prow .pk{font-size:11px;color:var(--dim);font-family:var(--font-data);line-height:1.3}
+.prow .pk small{display:block;opacity:.7;font-family:var(--font-ui);font-size:10px}
+.prow .cur{font-size:12px;color:var(--dim);font-family:var(--font-data);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prow .ed{display:flex;gap:6px;align-items:center}
+.prow input,.prow select,.envrow input{font:12px var(--font-data);
+  background:color-mix(in srgb,var(--txt) 5%,transparent);
+  border:1px solid var(--card-edge);color:var(--txt);border-radius:8px;padding:6px 9px;min-width:150px;outline:none;
+  transition:border-color .2s,box-shadow .2s}
+.prow input:focus,.prow select:focus,.envrow input:focus{border-color:var(--acc);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 18%,transparent)}
+.prow .act{display:flex;gap:5px}
+.prow .act .btn{padding:4px 11px;font-size:11px}
+.sect{margin-top:18px}
+.sect h3{font-size:10.5px;text-transform:uppercase;letter-spacing:2px;color:var(--dim);margin-bottom:10px;
+  padding-bottom:7px;border-bottom:1px solid var(--card-edge);position:relative;display:flex;align-items:center}
+.sect h3::after{content:"";position:absolute;left:0;bottom:-1px;width:36px;height:1.5px;border-radius:2px;
+  background:linear-gradient(90deg,var(--acc2),transparent);opacity:.9}
+.envrow{display:grid;grid-template-columns:230px 1fr auto;gap:12px;align-items:center;
+  padding:8px 12px;border-bottom:1px solid color-mix(in srgb,var(--txt) 6%,transparent);font-size:12.5px}
+.envrow .k2{font-family:var(--font-data);color:var(--acc2)}
+
+/* raw editor — terminal panel */
+.rawbox{position:relative}
+.rawbox textarea{width:100%;min-height:420px;resize:vertical;font:12.5px/1.55 var(--font-data);
+  background:color-mix(in srgb,#000 30%,transparent);border:1px solid var(--card-edge);color:var(--txt);
+  border-radius:10px;padding:14px;outline:none;tab-size:4;white-space:pre;overflow:auto}
+.rawbox textarea:focus{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 18%,transparent)}
+.rawbar{display:flex;align-items:center;gap:10px;margin-top:10px}
+.rawbar .hint{font-size:11px;color:var(--dim);flex:1}
+.dirty{color:var(--warn)!important}
+
+/* logs — terminal panel */
+#logpre{font:11.5px/1.5 var(--font-data);background:color-mix(in srgb,#000 30%,transparent);
+  border:1px solid var(--card-edge);border-radius:10px;padding:12px;min-height:200px;max-height:420px;
+  overflow:auto;white-space:pre-wrap;word-break:break-word;
+  color:color-mix(in srgb,var(--txt) 85%,transparent);
+  box-shadow:inset 0 2px 8px rgba(0,0,0,.4)}
+
+/* diff modal */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);
+  display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+.overlay.on{display:flex}
+.modal{background:var(--bg);border:1px solid var(--card-edge);border-radius:var(--radius);
+  width:min(860px,100%);max-height:85vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.6);
+  animation:moin .25s cubic-bezier(.2,.9,.3,1.2) both;position:relative;overflow:hidden}
+@keyframes moin{from{opacity:0;transform:translateY(18px) scale(.97)}to{opacity:1;transform:none}}
+.modal::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;
+  background:linear-gradient(90deg,var(--acc),var(--acc2) 45%,transparent);opacity:.8}
+.modal h3{font-size:13px;text-transform:uppercase;letter-spacing:2px;color:var(--acc);
+  padding:16px 20px 0;display:flex;align-items:center;gap:10px}
+.modal h3 .st{margin-left:auto}
+.modal .mbody{padding:14px 20px;overflow:auto;font-size:12.5px;flex:1}
+.modal .mfoot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--card-edge)}
+.difftext{font:12px/1.6 var(--font-data);background:color-mix(in srgb,#000 30%,transparent);
+  border:1px solid var(--card-edge);border-radius:10px;padding:12px;white-space:pre;overflow:auto;max-height:46vh;margin-top:8px}
+.difftext .add{color:var(--ok);text-shadow:0 0 calc(8px*var(--glow)) color-mix(in srgb,var(--ok) 45%,transparent)}
+.difftext .del{color:var(--bad);text-shadow:0 0 calc(8px*var(--glow)) color-mix(in srgb,var(--bad) 45%,transparent)}
+.difftext .hunk{color:var(--acc);opacity:.8}
+.mnote{color:var(--dim);font-size:12px;margin-top:10px}
+.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%) translateY(8px);background:var(--bg);
+  border:1px solid var(--card-edge);border-radius:12px;padding:11px 20px;font-size:12.5px;
+  box-shadow:var(--shadow);z-index:60;opacity:0;transition:opacity .3s,transform .3s;pointer-events:none}
+.toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.bad{border-color:color-mix(in srgb,var(--bad) 50%,transparent);color:var(--bad)}
+.foot{margin-top:16px;color:var(--dim);opacity:.65;font-size:11px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+
+/* native controls (selects) */
+html{color-scheme:dark}
+option{background:color-mix(in srgb,var(--txt) 8%,transparent);color:var(--txt)}
+option:checked{background:color-mix(in srgb,var(--acc) 22%,transparent);color:var(--txt)}
+select,.prow select,.envrow select{appearance:none;-webkit-appearance:none;padding-right:26px;cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%238b98b8' stroke-width='1.5' stroke-linecap='round'/></svg>");
+  background-repeat:no-repeat;background-position:right 9px center}
+
+/* custom dropdown — replaces native select */
+.mselect{position:relative;display:inline-flex;align-items:center;gap:6px;
+  font:12px var(--font-data);background:color-mix(in srgb,var(--txt) 5%,transparent);
+  border:1px solid var(--card-edge);color:var(--txt);border-radius:8px;padding:6px 9px;
+  min-width:260px;max-width:560px;cursor:pointer;transition:border-color .2s,box-shadow .2s}
+.mselect:hover{border-color:color-mix(in srgb,var(--acc) 40%,transparent)}
+.mselect.on{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 18%,transparent)}
+.msel-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.msel-caret{color:var(--dim);font-size:10px;flex:none;transition:transform .2s}
+.mselect.on .msel-caret{transform:rotate(180deg)}
+.msel-panel{display:none;position:absolute;top:calc(100% + 5px);left:0;min-width:100%;max-width:620px;
+  max-height:290px;overflow:auto;z-index:40;
+  background:var(--card);border:1px solid var(--card-edge);border-radius:10px;
+  box-shadow:0 18px 50px rgba(0,0,0,.55);backdrop-filter:blur(10px);padding:4px;
+  animation:rise .18s both}
+.msel-panel.on{display:block}
+.msel-opt{padding:7px 10px;border-radius:7px;font-size:12px;font-family:var(--font-data);
+  cursor:pointer;color:var(--txt);line-height:1.35}
+.msel-opt.nowrap{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.msel-opt:hover{background:color-mix(in srgb,var(--acc) 12%,transparent)}
+.msel-opt.sel{color:var(--acc);background:color-mix(in srgb,var(--acc) 14%,transparent);font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>gx10</b></div>
+  <div class="tabs">
+    <a class="tab" href="/metrics">metrics</a>
+    <a class="tab on" href="/engines">engines</a>
+    <a class="tab" href="/settings">settings</a>
+  </div>
+  <div class="live" id="live"><i></i>live</div>
+</header>
+
+<!-- ══ FLEET ═══════════════════════════════════════════════ -->
+<div class="card" id="budget-card">
+  <h2>UMA budget <span class="pill" id="uma-pill">–</span></h2>
+  <div class="budget">
+    <div class="budget-top">
+      <div class="big"><span id="uma-used">–</span><small> / <span id="uma-total">–</span> GiB</small></div>
+      <div class="k" id="uma-note"></div>
+    </div>
+    <div class="umabar"><i class="gpu" id="uma-bar"></i><i class="free"></i></div>
+    <div class="budget-rows" id="uma-rows"></div>
+  </div>
+</div>
+
+<div class="fleet" id="fleet"></div>
+
+<!-- ══ DETAIL ══════════════════════════════════════════════ -->
+<div id="detail">
+  <div class="dhead">
+    <span class="back" id="d-back">← fleet</span>
+    <span class="nm" id="d-name">–</span>
+    <span class="st" id="d-state">–</span>
+    <span class="st" id="d-enabled" style="display:none"></span>
+    <div class="acts" id="d-acts"></div>
+  </div>
+  <div class="dtabs">
+    <button class="dtab on" data-pane="params" id="dt-params">parameters</button>
+    <button class="dtab" data-pane="raw" id="dt-raw">raw file</button>
+    <button class="dtab" data-pane="logs" id="dt-logs">logs</button>
+  </div>
+
+  <div class="card pane on" id="pane-params">
+    <div id="p-curated"></div>
+    <div class="sect" id="p-flags-wrap">
+      <h3>all flags (surgical — one byte-exact edit at a time)</h3>
+      <div class="ptable" id="p-flags"></div>
+    </div>
+    <div class="sect" id="p-env-wrap">
+      <h3>environment</h3>
+      <div id="p-env"></div>
+    </div>
+    <div id="p-docker"></div>
+  </div>
+
+  <div class="card pane" id="pane-raw">
+    <div class="rawbox">
+      <textarea id="rawtext" spellcheck="false"></textarea>
+      <div class="rawbar">
+        <span class="hint" id="raw-hint"></span>
+        <button class="btn" id="raw-preview">preview diff</button>
+        <button class="btn pri" id="raw-save">save file</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card pane" id="pane-logs">
+    <div class="rawbar" style="margin-bottom:10px">
+      <span class="hint" id="log-hint">last 150 lines · auto-refresh 3s</span>
+      <button class="btn" id="log-refresh">refresh now</button>
+    </div>
+    <div id="logpre">loading…</div>
+  </div>
+</div>
+
+<div class="foot">
+  <span>config source of truth: systemd units + docker recipes · every write is diffed &amp; backed up</span>
+  <span id="upd"></span>
+</div>
+
+<!-- modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h3 id="m-title">confirm <span class="st" id="m-st"></span></h3>
+    <div class="mbody" id="m-body"></div>
+    <div class="mfoot">
+      <button class="btn" id="m-cancel">cancel</button>
+      <button class="btn pri" id="m-ok">confirm</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function api(path){
+  return fetch(path).then(function(r){return r.json();}).catch(function(e){return {error:String(e)};});
+}
+function apiPost(path,obj){
+  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj||{})})
+    .then(function(r){return r.json();});
+}
+function toast(msg,bad){
+  var el=$('toast');
+  el.textContent=msg;
+  el.className='toast on'+(bad?' bad':'');
+  clearTimeout(el._t);
+  el._t=setTimeout(function(){el.className='toast';},4200);
+}
+function diffHtml(lines){
+  if(!lines||!lines.length)return '<div class="difftext">(no changes)</div>';
+  var h='<div class="difftext">';
+  lines.forEach(function(l){
+    if(l.charAt(0)==='+'&&l.charAt(1)!=='+')h+='<span class="add">'+esc(l)+'</span>\n';
+    else if(l.charAt(0)==='-'&&l.charAt(1)!=='-')h+='<span class="del">'+esc(l)+'</span>\n';
+    else if(l.charAt(0)==='@')h+='<span class="hunk">'+esc(l)+'</span>\n';
+    else h+=esc(l)+'\n';
+  });
+  return h+'</div>';
+}
+var _modalAction=null;
+function openModal(title,html,confirmLabel,action){
+  $('m-title').childNodes[0].nodeValue=title+' ';
+  $('m-body').innerHTML=html;
+  $('m-ok').textContent=confirmLabel;
+  _modalAction=action;
+  $('overlay').classList.add('on');
+}
+function closeModal(){$('overlay').classList.remove('on');_modalAction=null;}
+$('m-cancel').addEventListener('click',closeModal);
+$('m-ok').addEventListener('click',function(){
+  var a=_modalAction;closeModal();
+  if(a)a();
+});
+$('overlay').addEventListener('click',function(e){if(e.target===$('overlay'))closeModal();});
+
+/* ── fleet ─────────────────────────────────────────────── */
+var FLEET=[];
+function stateSt(s){
+  if(s==='active')return 'ok';
+  if(s==='failed')return 'bad';
+  if(s==='inactive')return '';
+  return 'warn';
+}
+function loadFleet(){
+  return api('/api/engines').then(function(m){
+    if(m.error)return;
+    FLEET=m.fleet||[];
+    // budget
+    api('/api/').then(function(mm){
+      if(mm.error)return;
+      var total=mm.mem.total_gib,used=mm.mem.used_gib,avail=mm.mem.avail_gib;
+      $('uma-total').textContent=total;
+      $('uma-used').textContent=used.toFixed(1);
+      var bar=$('uma-bar');
+      bar.style.width=Math.min(100,100*used/total)+'%';
+      bar.parentElement.classList.toggle('warn',used/total>0.9);
+      $('uma-pill').textContent=Math.round(100*used/total)+'%';
+      $('uma-pill').className='pill '+(used/total>0.9?'warn':'');
+      $('uma-note').textContent=avail.toFixed(1)+' GiB available · 121 GiB unified (GPU + CPU share one pool)';
+      var rows=$('uma-rows');rows.innerHTML='';
+      FLEET.forEach(function(e){
+        var act=e.active==='active';
+        var memTxt='–';
+        if(e.kind==='unit'&&e.rss_gib)memTxt=e.rss_gib.toFixed(1)+' GiB';
+        else if(act&&e.kind==='docker'){
+          var gmu=e.gpu_mem_util;
+          if(gmu)memTxt='~'+Math.round(gmu*total*0.95)+' GiB (gmu '+gmu+')';
+          else memTxt='in GPU pool';
+        }else if(act)memTxt='in GPU pool';
+        else if(e.kind==='docker'&&/Exited|Dead/i.test(e.status||''))memTxt='down';
+        var sub=e.kind==='unit'
+          ?(e.model_short?('model '+e.model_short+(e.ctx?' · ctx '+e.ctx:'')):(e.engine||''))
+          :((e.image||''));
+        var div=document.createElement('div');
+        div.className='brow'+(act?'':' off');
+        div.innerHTML='<span class="dot '+(act?'ok':(e.active==='failed'?'bad':''))+'"></span>'
+          +'<span class="nm">'+esc(e.name)+'</span>'
+          +'<span class="sub">'+esc(sub)+'</span>'
+          +'<span class="val">'+memTxt+'</span>';
+        div.addEventListener('click',function(){openDetail(e);});
+        rows.appendChild(div);
+      });
+    });
+    // fleet cards
+    var g=$('fleet');g.innerHTML='';
+    FLEET.forEach(function(e){
+      var c=document.createElement('div');
+      c.className='card fcard '+stateSt(e.active);
+      var st=stateSt(e.active);
+      // backend: unit engines by engine label, docker = vllm
+      var be=e.kind==='docker'?'vllm':(e.engine==='sglang'?'sglang':((e.engine&&e.engine.indexOf('ds4')===0)?'ds4':'llama'));
+      var typeTxt=e.kind==='docker'?'vllm·docker':(e.engine||'llama');
+      // sub line: wrapping chips (no duplicated model name — the mdl row has it)
+      var chips=[];
+      if(e.alias)chips.push('alias '+esc(e.alias));
+      if(e.kind==='port'){
+        if(e.port)chips.push(':'+e.port);
+        if(e.model_short)chips.push(esc(e.model_short));
+      }else if(e.kind==='unit'){
+        if(e.port)chips.push(':'+e.port);
+        if(e.ctx)chips.push('ctx '+e.ctx);
+        if(e.parallel)chips.push('par '+e.parallel);
+        if(e.spec_type)chips.push('spec '+esc(e.spec_type));
+      }else{
+        var img=(e.image||'').split(':')[1]||e.image;
+        if(img)chips.push('image '+esc(img));
+        if(e.port)chips.push(':'+e.port);
+        if(e.status){
+          var exited=/Exited|Dead|Created/i.test(e.status);
+          chips.push('<span class="chip'+(exited?' chip-bad':'')+'">'+esc(e.status)+'</span>');
+        }
+      }
+      var sub=chips.map(function(x){return '<span class="chip">'+x+'</span>';})
+        .join('<span class="sep">·</span>');
+      c.innerHTML='<div class="fcard-head">'
+        +'<div class="nm" title="'+esc(e.name)+'">'+esc(e.name)+'</div>'
+        +'<div class="fcard-tags">'
+        +'<span class="type '+be+'">'+esc(typeTxt)+'</span>'
+        +'<span class="st '+st+'">'+esc(e.active)+'</span></div></div>'
+        +'<div class="mdl" title="'+esc(e.model||'')+'">'+esc(e.model||e.model_short||'—')+'</div>'
+        +'<div class="sub">'+sub+'</div>';
+      c.addEventListener('click',function(){openDetail(e);});
+      g.appendChild(c);
+    });
+    $('live').innerHTML='<i></i>live';
+    $('upd').textContent='updated '+new Date().toLocaleTimeString();
+  });
+}
+
+/* ── detail state ───────────────────────────────────────── */
+var CUR=null; // {kind:'unit'|'docker', name}
+function openDetail(e){
+  CUR={kind:e.kind,name:e.name};
+  FLEET=e;
+  $('fleet').style.display='none';
+  $('budget-card').style.display='none';
+  $('detail').style.display='block';
+  $('d-name').textContent=e.name;
+  var old=$('d-portinfo');if(old)old.remove();
+  renderDetail();
+}
+$('d-back').addEventListener('click',function(){
+  CUR=null;
+  $('detail').style.display='none';
+  $('fleet').style.display='grid';
+  $('budget-card').style.display='block';
+  stopLogs();
+});
+function dKey(){return CUR?CUR.name.replace('.service',''):null;}
+
+function renderDetail(){
+  if(!CUR)return;
+  if(CUR.kind==='port'){renderDetailPort();return;}
+  var base=CUR.kind==='unit'?('/api/engines/unit/'+encodeURIComponent(dKey()))
+                            :('/api/engines/docker/'+encodeURIComponent(dKey()));
+  api(base).then(function(d){
+    if(d.error){toast(d.error,true);return;}
+    if(CUR&&CUR.name!==(d.name))return; // stale
+    $('d-state').textContent=d.active||(d.container&&d.container.status)||'–';
+    $('d-state').className='st '+stateSt(d.active||(d.container&&d.container.status&&d.container.status.indexOf('Up')===0?'active':'inactive'));
+    var en=$('d-enabled');
+    if(CUR.kind==='unit'&&d.enabled&&d.enabled!=='unknown'){
+      en.style.display='inline-block';
+      en.textContent='enabled';
+      en.className='st '+(d.enabled==='enabled'?'ok':'');
+    }else en.style.display='none';
+    var acts=$('d-acts');acts.innerHTML='';
+    if(CUR.kind==='unit'){
+      ['start','stop','restart'].forEach(function(a){addBtn(acts,a,a==='stop'&&d.active==='active'?'pri':'');});
+      var eb=document.createElement('button');
+      eb.className='btn';eb.textContent=d.enabled==='enabled'?'disable':'enable';
+      eb.addEventListener('click',function(){actUnit(d.enabled==='enabled'?'disable':'enable');});
+      acts.appendChild(eb);
+    }else{
+      ['start','stop','restart'].forEach(function(a){addBtn(acts,a,'');});
+      var ap=document.createElement('button');
+      ap.className='btn pri';ap.textContent='apply recipe (recreate)';
+      ap.addEventListener('click',function(){
+        var rec=d.recipe;
+        apiPost(base+'/recipe/preview',{recipe:rec}).then(function(p){
+          if(p.error){toast(p.error,true);return;}
+          if(!p.changed){toast('recipe already matches current container');return;}
+          openModal('recreate container',
+            '<div>Container <b class="mono">'+esc(d.name)+'</b> will be stopped, removed and recreated from its recipe. '
+            +'Container-specific state (runtime logs) is lost; mounts and recipe settings carry over.</div>'
+            +diffHtml(p.diff),
+            'recreate',function(){actDocker('apply');});
+        });
+      });
+      acts.appendChild(ap);
+    }
+    renderParams(d);
+    renderRaw(d);
+    startLogs();
+  });
+}
+function addBtn(parent,label,cls){
+  var b=document.createElement('button');
+  b.className='btn '+(cls||'');b.textContent=label;
+  b.addEventListener('click',function(){
+    if(CUR.kind==='unit')actUnit(label);else actDocker(label);
+  });
+  parent.appendChild(b);
+}
+function renderDetailPort(){
+  var base='/api/engines/port/'+encodeURIComponent(dKey());
+  api(base).then(function(d){
+    if(d.error){toast(d.error,true);return;}
+    if(CUR&&CUR.name!==d.name)return; // stale
+    $('d-state').textContent=d.active;
+    $('d-state').className='st '+stateSt(d.active);
+    $('d-enabled').style.display='none';
+    var acts=$('d-acts');acts.innerHTML='';
+    // no lifecycle: a port engine is a bare process the dashboard doesn't own
+    var note=document.createElement('span');
+    note.className='mnote';
+    note.textContent='bare endpoint — lifecycle is managed outside the dashboard';
+    acts.appendChild(note);
+    var info=document.createElement('div');
+    info.className='mnote';info.id='d-portinfo';
+    info.style.marginTop='8px';
+    info.innerHTML='endpoint <b class="mono">http://127.0.0.1:'+(d.port||'–')+'/v1</b>'
+      +(d.model?'<br>model <b class="mono">'+esc(d.model)+'</b>':'')
+      +(d.owned_by?'<br>served by <b class="mono">'+esc(d.owned_by)+'</b>':'')
+      +(d.proc?'<br>pid <b class="mono">'+esc(d.proc.pid)+'</b> · <span class="mono">'+esc((d.proc.cmdline||'').slice(0,160))+'</span>':'')
+      +'<br><a href="metrics.html" style="color:var(--acc)">metrics page</a> tracks this port when it answers /metrics';
+    var card=document.querySelector('#detail .card')||$('detail');
+    card.appendChild(info);
+  });
+}
+function actUnit(a){
+  apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/action',{action:a}).then(function(r){
+    if(!r.ok)toast(a+': '+(r.detail||'failed'),true);
+    else toast(a+' issued');
+    setTimeout(renderDetail,900);
+  });
+}
+function actDocker(a){
+  apiPost('/api/engines/docker/'+encodeURIComponent(dKey())+'/action',{action:a}).then(function(r){
+    if(!r.ok)toast(a+': '+(r.detail||'failed'),true);
+    else toast(a+' issued');
+    setTimeout(renderDetail,1200);
+  });
+}
+
+/* ── parameters ─────────────────────────────────────────── */
+var MODELS=null;
+function models(){
+  if(MODELS)return Promise.resolve(MODELS);
+  return api('/api/engines/models').then(function(m){MODELS=m.models||[];return MODELS;});
+}
+var QUICK_UNIT=[
+  {f:'m',label:'model (-m)',hint:'main model GGUF',pick:'gguf'},
+  {f:'port',label:'port',hint:'listen port',num:true},
+  {f:'host',label:'host',hint:'bind address'},
+  {f:'c',label:'context (-c)',hint:'max context tokens',num:true},
+  {f:'parallel',label:'parallel',hint:'slots',num:true},
+  {f:'alias',label:'alias',hint:'served model name'},
+  {f:'t',label:'temperature (-t)',hint:'sampling temp (default 0.80)',num:true},
+  {f:'top-p',label:'top-p',hint:'nucleus sampling',num:true},
+  {f:'top-k',label:'top-k',hint:'top-k sampling',num:true},
+  {f:'min-p',label:'min-p',hint:'min-p sampling',num:true}
+];
+function renderParams(d){
+  var cu=$('p-curated'),fl=$('p-flags'),en=$('p-env'),dw=$('p-docker');
+  $('p-flags-wrap').style.display='none';
+  $('p-env-wrap').style.display='none';
+  dw.innerHTML='';
+  if(CUR.kind==='docker'){renderDockerParams(d,dw);return;}
+  $('p-flags-wrap').style.display='block';
+  $('p-env-wrap').style.display='block';
+  cu.innerHTML='<h3 class="k" style="letter-spacing:2px;text-transform:uppercase;margin-bottom:10px">frequently edited</h3>';
+  var host=d.name;
+  models().then(function(list){
+    QUICK_UNIT.forEach(function(q){
+      var cur=d.flags[q.f];
+      cu.appendChild(prowUnit(q.f,q.label,q.hint,cur,q.num,q.pick,list));
+    });
+  });
+  fl.innerHTML='';
+  (d.flag_order||[]).forEach(function(f){
+    fl.appendChild(prowUnit(f,f,f==null?'':'',d.flags[f],null,null,null));
+  });
+  en.innerHTML='';
+  Object.keys(d.env||{}).forEach(function(k){
+    var r=document.createElement('div');r.className='envrow';
+    r.innerHTML='<span class="k2">'+esc(k)+'</span><input value="'+esc(d.env[k])+'" data-k="'+esc(k)+'">'
+      +'<span class="act"><button class="btn" data-op="set">set</button><button class="btn danger" data-op="remove">remove</button></span>';
+    en.appendChild(r);
+  });
+  en.querySelectorAll('.act .btn').forEach(function(b){
+    b.addEventListener('click',function(){
+      var row=b.closest('.envrow'),k=row.querySelector('.k2').textContent;
+      var op=b.getAttribute('data-op');
+      envOp(k,op,op==='set'?row.querySelector('input').value:null);
+    });
+  });
+}
+/* custom dropdown (no native select popup) */
+function mselHtml(flag,opts){
+  var sel=null;
+  for(var i=0;i<opts.length;i++)if(opts[i].sel)sel=opts[i];
+  if(!sel)sel=opts[0];
+  var h='<div class="mselect"><span class="msel-label" title="'+esc(sel.v)+'">'+esc(sel.t)+'</span>'
+    +'<span class="msel-caret">▼</span>'
+    +'<input type="hidden" data-f="'+esc(flag)+'" value="'+esc(sel.v)+'">'
+    +'<div class="msel-panel">';
+  opts.forEach(function(o){
+    var cls=(o.t.length>58)?'':' nowrap';
+    h+='<div class="msel-opt'+(o.sel?' sel':'')+cls+'" data-v="'+esc(o.v)+'" title="'+esc(o.v)+'">'+esc(o.t)+'</div>';
+  });
+  return h+'</div></div>';
+}
+function wireMselect(r){
+  var box=r.querySelector('.mselect');
+  if(!box)return;
+  var panel=box.querySelector('.msel-panel');
+  box.addEventListener('click',function(e){
+    var opt=e.target.closest('.msel-opt');
+    if(opt){
+      box.querySelector('.msel-label').textContent=opt.textContent;
+      box.querySelector('input[data-f]').value=opt.getAttribute('data-v');
+      panel.querySelectorAll('.msel-opt').forEach(function(x){x.classList.remove('sel');});
+      opt.classList.add('sel');
+      box.classList.remove('on');
+      return;
+    }
+    box.classList.toggle('on');
+    panel.classList.toggle('on',box.classList.contains('on'));
+  });
+}
+document.addEventListener('click',function(e){
+  document.querySelectorAll('.mselect.on').forEach(function(b){
+    if(!b.contains(e.target)){b.classList.remove('on');b.querySelector('.msel-panel').classList.remove('on');}
+  });
+});
+function prowUnit(flag,label,hint,cur,num,pick,list){
+  var r=document.createElement('div');r.className='prow';
+  var inputHtml='<input value="'+esc(cur==null?'':cur)+'" placeholder="'+(cur==null?'not set':esc(cur))+'" '
+    +(num?'':'')+'data-f="'+esc(flag)+'">';
+  if(pick&&list){
+    var opts2=[];
+    opts2.push({v:'',t:'— none —',sel:cur==null});
+    list.filter(function(m){return m.kind===pick;}).forEach(function(m){
+      opts2.push({v:m.path,t:m.name+' ('+m.gib+' GiB)',sel:m.path===cur});
+    });
+    if(cur!=null&&list.every(function(m){return m.path!==cur;})){
+      var base=(cur.split('/').pop())||cur;
+      opts2.push({v:cur,t:base+' (current)',sel:true});
+    }
+    inputHtml=mselHtml(flag,opts2);
+  }
+  var exists=cur!=null;
+  r.innerHTML='<div class="pk">'+esc(label)+(hint?'<small>'+esc(hint)+'</small>':'')+'</div>'
+    +'<div class="cur">'+(cur==null?'<span style="opacity:.5">not set</span>':esc(cur))+'</div>'
+    +'<div class="ed">'+inputHtml
+    +'<span class="act">'
+    +(exists?'<button class="btn" data-op="set">set</button>':'<button class="btn pri" data-op="add">add</button>')
+    +(exists?'<button class="btn danger" data-op="remove">remove</button>':'')
+    +'</span></div>';
+  wireMselect(r);
+  r.querySelectorAll('.act .btn').forEach(function(b){
+    b.addEventListener('click',function(){
+      var op=b.getAttribute('data-op');
+      if(op==='remove'){flagOp(flag,'remove',null);return;}
+      var inp=r.querySelector('[data-f]');
+      var v=inp.value===''?null:inp.value;
+      if(v==null){toast('value required');return;}
+      flagOp(flag,op,v);
+    });
+  });
+  return r;
+}
+function flagOp(flag,op,value){
+  apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/flag/preview',{op:op,flag:flag,value:value}).then(function(p){
+    if(p.error){toast(p.error,true);return;}
+    if(!p.changed){toast('no change — value already set');return;}
+    openModal((op==='remove'?'remove flag ':'change flag ')+flag,
+      '<div>Unit <b class="mono">'+dKey()+'.service</b> · op <b class="mono">'+op+'</b>'
+      +(value!=null?' · value <b class="mono">'+esc(value)+'</b>':'')
+      +'</div>'+diffHtml(p.diff),
+      'apply to unit',function(){
+        apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/flag',{op:op,flag:flag,value:value}).then(function(r){
+          if(!r.ok){toast('apply failed',true);return;}
+          toast('applied · backup '+(r.backup?r.backup.split('/').pop():''));
+          renderDetail();
+        });
+      });
+  });
+}
+function envOp(key,op,value){
+  apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/env/preview',{op:op,key:key,value:value}).then(function(p){
+    if(p.error){toast(p.error,true);return;}
+    if(!p.changed){toast('no change');return;}
+    openModal((op==='remove'?'remove env ':'set env ')+key,
+      '<div>Unit <b class="mono">'+dKey()+'.service</b></div>'+diffHtml(p.diff),
+      'apply to unit',function(){
+        apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/env',{op:op,key:key,value:value}).then(function(r){
+          if(!r.ok){toast('apply failed',true);return;}
+          toast('applied · backup '+(r.backup?r.backup.split('/').pop():''));
+          renderDetail();
+        });
+      });
+  });
+}
+/* docker params */
+var QUICK_DOCKER=[
+  {k:'image',label:'image',hint:'docker image ref'},
+  {k:'model',label:'model',hint:'HF repo passed to serve'},
+  {k:'port',label:'host port',hint:'published port',num:true}
+];
+function isFlagLike(s){return typeof s==='string'&&s.indexOf('-')===0&&s.length>1;}
+function renderDockerParams(d,host){
+  var rec=d.recipe||{};
+  var cu=$('p-curated');
+  cu.innerHTML='<h3 class="k" style="letter-spacing:2px;text-transform:uppercase;margin-bottom:10px">recipe (source of truth: /opt/gx10-dashboard/recipes/'+esc(d.name)+'.json)</h3>';
+  QUICK_DOCKER.forEach(function(q){
+    var cur=q.k==='port'?(rec.ports&&rec.ports[0]?rec.ports[0].host:''):(rec[q.k]||'');
+    var r=document.createElement('div');r.className='prow';
+    r.innerHTML='<div class="pk">'+esc(q.label)+'<small>'+esc(q.hint)+'</small></div>'
+      +'<div class="cur">'+esc(cur)+'</div>'
+      +'<div class="ed"><input data-dk="'+esc(q.k)+'" value="'+esc(cur)+'">'
+      +'<span class="act"><button class="btn" data-op="set">apply</button></span></div>';
+    r.querySelector('.act .btn').addEventListener('click',function(){
+      var v=r.querySelector('input').value;
+      if(!v){toast('value required');return;}
+      var nr=JSON.parse(JSON.stringify(rec));
+      if(q.k==='port'){
+        nr.ports=nr.ports||[{host:v,container:v,host_ip:'127.0.0.1'}];
+        nr.ports[0].host=v;nr.ports[0].container=v;
+      }else nr[q.k]=v;
+      dockRecipe(nr);
+    });
+    cu.appendChild(r);
+  });
+  // cmd arg editor
+  var sect=document.createElement('div');sect.className='sect';
+  sect.innerHTML='<h3>serve args (docker run tail)</h3><div class="ptable" id="p-dcmd"></div>';
+  cu.appendChild(sect);
+  var host2=sect.querySelector('#p-dcmd');
+  var cmd=rec.cmd||[];
+  var i=0;
+  while(i<cmd.length){
+    (function(i,a,hasVal,rowIdxs){
+      var r=document.createElement('div');r.className='prow';
+      var cur=cmd.slice(i,i+rowIdxs.length).join(' ');
+      r.innerHTML='<div class="pk">'+esc(a.length>34?a.slice(0,34)+'…':a)+'<small>'+(hasVal?'arg '+(i+1)+' + value':'arg '+(i+1))+'</small></div>'
+        +'<div class="cur"></div>'
+        +'<div class="ed"><input data-di="'+i+'" value="'+esc(cur)+'">'
+        +(i!==0?'<span class="act"><button class="btn" data-op="set">set</button><button class="btn danger" data-op="remove">remove</button></span>':'')
+        +'</div>';
+      r.querySelectorAll('.act .btn').forEach(function(b){
+        b.addEventListener('click',function(){
+          var nr=JSON.parse(JSON.stringify(rec));nr.cmd=nr.cmd.slice();
+          var v=r.querySelector('input').value.trim();
+          if(b.getAttribute('data-op')==='remove'){nr.cmd.splice(i,rowIdxs.length);dockRecipe(nr);return;}
+          if(!v){toast('value required');return;}
+          var parts=v.split(/\s+/);
+          nr.cmd[i]=parts[0];
+          nr.cmd.splice(i+1,hasVal?1:0);
+          if(parts.length>1)nr.cmd.splice(i+1,0,parts.slice(1).join(' '));
+          dockRecipe(nr);
+        });
+      });
+      host2.appendChild(r);
+    })(i,cmd[i],(i>0&&isFlagLike(cmd[i])&&i+1<cmd.length&&!isFlagLike(cmd[i+1])),
+       (i>0&&isFlagLike(cmd[i])&&i+1<cmd.length&&!isFlagLike(cmd[i+1]))?[i,i+1]:[i]);
+    i+=((i>0&&isFlagLike(cmd[i])&&i+1<cmd.length&&!isFlagLike(cmd[i+1]))?2:1);
+  }
+  var add=document.createElement('button');
+  add.className='btn';add.style.marginTop='10px';add.textContent='+ append arg (flag)';
+  add.addEventListener('click',function(){
+    var box=document.createElement('div');
+    box.innerHTML='<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+      +'<input id="mflag" placeholder="--flag (e.g. --max-model-len)" style="font:12px var(--font-data);background:transparent;border:1px solid var(--card-edge);color:var(--txt);border-radius:8px;padding:7px 10px;width:230px">'
+      +'<input id="mval" placeholder="value (blank if none)" style="font:12px var(--font-data);background:transparent;border:1px solid var(--card-edge);color:var(--txt);border-radius:8px;padding:7px 10px;flex:1;min-width:150px"></div>'
+      +'<div class="mnote">appended to the docker serve args</div>';
+    openModal('append serve arg',box,'append & preview',function(){
+      var f=$('mflag').value.trim();var v=$('mval').value.trim();
+      if(!f){toast('flag required');return;}
+      var nr=JSON.parse(JSON.stringify(rec));
+      nr.cmd=nr.cmd.slice();nr.cmd.push(f);if(v)nr.cmd.push(v);
+      dockRecipe(nr);
+    });
+  });
+  host2.appendChild(add);
+}
+function dockRecipe(rec){
+  apiPost('/api/engines/docker/'+encodeURIComponent(dKey())+'/recipe/preview',{recipe:rec}).then(function(p){
+    if(p.error){toast(p.error,true);return;}
+    if(!p.changed){toast('no change');return;}
+    openModal('apply recipe','<div>Docker run command will change as follows, then the container is recreated.</div>'+diffHtml(p.diff),'apply & recreate',function(){
+      apiPost('/api/engines/docker/'+encodeURIComponent(dKey())+'/recipe',{recipe:rec}).then(function(sr){
+        if(!sr.ok){toast('recipe save failed',true);return;}
+        actDocker('apply');
+      });
+    });
+  });
+}
+
+/* ── raw editor ─────────────────────────────────────────── */
+var RAW_ORIG='';
+function renderRaw(d){
+  var ta=$('rawtext');
+  ta.value=d.kind==='unit'?d.raw:JSON.stringify(d.recipe||{},null,2);
+  RAW_ORIG=ta.value;
+  $('raw-hint').innerHTML=d.kind==='unit'
+    ?('editing <b class="mono">'+esc(d.path)+'</b> · save takes a .bak then daemon-reloads')
+    :('editing recipe <b class="mono">'+esc(d.name)+'.json</b> · apply recreates the container');
+  markDirty();
+}
+function markDirty(){
+  $('raw-hint').classList.toggle('dirty',$('rawtext').value!==RAW_ORIG);
+}
+$('rawtext').addEventListener('input',markDirty);
+$('raw-preview').addEventListener('click',function(){
+  var v=$('rawtext').value;
+  if(CUR.kind==='unit'){
+    apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/raw/preview',{content:v}).then(function(p){
+      if(p.error){toast(p.error,true);return;}
+      if(!p.changed){toast('no changes vs saved file');return;}
+      openModal('raw file save','<div>Writing <b class="mono">'+dKey()+'.service</b> · backup created automatically, then <b>daemon-reload</b>.</div>'+diffHtml(p.diff),'save file',function(){
+        apiPost('/api/engines/unit/'+encodeURIComponent(dKey())+'/raw',{content:v}).then(function(r){
+          if(!r.ok){toast('save failed',true);return;}
+          toast('saved · backup '+r.backup.split('/').pop());
+          renderDetail();
+        });
+      });
+    });
+  }else{
+    var parsed;
+    try{parsed=JSON.parse(v);}catch(e){toast('recipe JSON invalid: '+e,true);return;}
+    dockRecipe(parsed);
+  }
+});
+$('raw-save').addEventListener('click',function(){$('raw-preview').click();});
+
+/* ── detail tabs ────────────────────────────────────────── */
+document.querySelectorAll('.dtab').forEach(function(b){
+  b.addEventListener('click',function(){
+    document.querySelectorAll('.dtab').forEach(function(x){x.classList.remove('on');});
+    b.classList.add('on');
+    document.querySelectorAll('.pane').forEach(function(x){x.classList.remove('on');});
+    $('pane-'+b.getAttribute('data-pane')).classList.add('on');
+    if(b.getAttribute('data-pane')==='logs')refreshLogs();
+  });
+});
+
+/* ── logs ───────────────────────────────────────────────── */
+var LOG_T=null;
+function logsPath(){
+  return '/api/engines/logs/'+encodeURIComponent(dKey())+'?lines=150';
+}
+function refreshLogs(){
+  if(!CUR)return;
+  api(logsPath()).then(function(l){
+    if(l.error)return;
+    $('logpre').textContent=l.logs||'(no log lines)';
+    $('logpre').scrollTop=$('logpre').scrollHeight;
+  });
+}
+function startLogs(){
+  stopLogs();
+  if($('pane-logs').classList.contains('on'))refreshLogs();
+  LOG_T=setInterval(function(){if($('pane-logs').classList.contains('on')&&CUR)refreshLogs();},3000);
+}
+function stopLogs(){if(LOG_T){clearInterval(LOG_T);LOG_T=null;}}
+$('log-refresh').addEventListener('click',refreshLogs);
+
+/* ── boot ───────────────────────────────────────────────── */
+loadFleet();
+setInterval(loadFleet,8000);
+</script>
+</body>
+</html>

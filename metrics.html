@@ -1,0 +1,1327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gx10 · metrics · dgx spark</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+/* ── base ─────────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0}
+html{
+  /* Grafana dark palette (fixed on this page — it is the Grafana clone) */
+  --gf-bg:#0b0f14;
+  --gf-bg2:#111827;
+  --gf-card:#141a22;
+  --gf-card2:#1a2332;
+  --gf-edge:#2a3344;
+  --gf-txt:#e5e9f0;
+  --gf-dim:#9aa3b2;
+  --gf-green:#22c55e;
+  --gf-bright:#4ade80;
+  --gf-gold:#eab308;
+  --gf-orange:#fb923c;
+  --gf-red:#ef4444;
+  --gf-blue:#60a5fa;
+  --gf-track:#1f2733;
+  --radius:10px;
+  --font-ui:'Segoe UI',system-ui,-apple-system,sans-serif;
+  --font-data:ui-monospace,'Cascadia Mono',Menlo,Consolas,monospace;
+}
+html,body{min-height:100%}
+body{
+  background:linear-gradient(180deg,var(--gf-bg) 0%,var(--gf-bg2) 100%) fixed;
+  color:var(--gf-txt);
+  font:13px/1.45 var(--font-ui);
+  padding:14px 16px 12px;
+}
+
+/* ── header ───────────────────────────────────────────────── */
+header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+.brand{font-size:16px;font-weight:700;letter-spacing:.4px;display:flex;align-items:center;gap:9px;white-space:nowrap}
+.brand b{color:var(--gf-bright);font-weight:800}
+.tabs{display:flex;gap:5px}
+.tab{font-size:11.5px;padding:4px 12px;border-radius:16px;border:1px solid var(--gf-edge);
+  color:var(--gf-dim);text-decoration:none;letter-spacing:.3px;transition:all .2s}
+.tab:hover{color:var(--gf-txt)}
+.tab.on{color:var(--gf-bright);border-color:color-mix(in srgb,var(--gf-green) 45%,transparent);
+  background:color-mix(in srgb,var(--gf-green) 10%,transparent)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--gf-green);
+  border:1px solid color-mix(in srgb,var(--gf-green) 40%,transparent);border-radius:16px;padding:2px 10px;white-space:nowrap}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--gf-green);animation:pulse 2s infinite}
+.live.bad{color:var(--gf-red);border-color:color-mix(in srgb,var(--gf-red) 40%,transparent)}
+.live.bad i{background:var(--gf-red);animation:none}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--gf-green) 45%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.rr{font-size:10.5px;color:var(--gf-dim);letter-spacing:.4px;white-space:nowrap}
+
+/* window picker (segmented — no native select element) */
+.seg{display:flex;border:1px solid var(--gf-edge);border-radius:16px;overflow:hidden}
+.seg button{appearance:none;background:transparent;border:none;color:var(--gf-dim);cursor:pointer;
+  font:11px var(--font-data);padding:4px 11px;letter-spacing:.3px;transition:all .15s}
+.seg button+button{border-left:1px solid var(--gf-edge)}
+.seg button:hover{color:var(--gf-txt)}
+.seg button.on{color:var(--gf-bright);background:color-mix(in srgb,var(--gf-green) 12%,transparent)}
+
+/* engine strip */
+.engstrip{display:flex;align-items:center;gap:10px;margin-bottom:10px;min-height:24px;flex-wrap:wrap}
+.edot{width:9px;height:9px;border-radius:50%;background:var(--gf-green);flex:none;
+  box-shadow:0 0 8px var(--gf-green);animation:pulse 2.4s infinite}
+.edot.off{background:#556;box-shadow:none;animation:none}
+.ename{font-family:var(--font-data);font-size:12.5px;font-weight:700;letter-spacing:.3px}
+.epill{font-size:10px;font-family:var(--font-data);padding:2px 9px;border-radius:12px;
+  border:1px solid var(--gf-edge);color:var(--gf-dim);letter-spacing:.4px}
+.epill.on{color:var(--gf-green);border-color:color-mix(in srgb,var(--gf-green) 45%,transparent)}
+.epill.off{color:var(--gf-red);border-color:color-mix(in srgb,var(--gf-red) 45%,transparent)}
+.eback{font-size:9.5px;font-family:var(--font-data);font-weight:700;letter-spacing:.8px;
+  padding:2px 8px;border-radius:12px;border:1px solid;flex:none}
+.eback.llama{color:var(--gf-blue);border-color:color-mix(in srgb,var(--gf-blue) 50%,transparent)}
+.eback.vllm{color:var(--gf-orange);border-color:color-mix(in srgb,var(--gf-orange) 50%,transparent)}
+.eback.sglang{color:var(--gf-gold);border-color:color-mix(in srgb,var(--gf-gold) 50%,transparent)}
+.eback.unknown{color:var(--gf-dim);border-color:var(--gf-edge)}
+.tmute{color:var(--gf-dim);font-size:11px}
+
+/* ── rows & cards ─────────────────────────────────────────── */
+.row{display:grid;gap:10px;margin-bottom:10px}
+.r24{grid-template-columns:repeat(24,1fr)}
+.r15{grid-template-columns:repeat(15,1fr)}
+.s24-4{grid-column:span 4}
+.s24-8{grid-column:span 8}
+.s24-12{grid-column:span 12}
+.s24-16{grid-column:span 16}
+.s15-3{grid-column:span 3}
+.card{
+  background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:10px 12px;min-width:0;
+}
+.card h2{font-size:10.5px;text-transform:uppercase;letter-spacing:1.6px;color:var(--gf-dim);
+  display:flex;align-items:center;gap:7px;margin-bottom:8px;font-weight:600;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.info{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;flex:none;
+  border:1px solid var(--gf-edge);border-radius:50%;font-size:8.5px;font-style:normal;color:var(--gf-dim);
+  cursor:help;font-family:var(--font-ui);transition:all .15s}
+.info:hover{border-color:var(--gf-blue);color:var(--gf-blue)}
+#infotip{position:fixed;z-index:100;max-width:300px;padding:7px 10px;border-radius:8px;
+  background:var(--gf-card2);border:1px solid var(--gf-edge);box-shadow:0 8px 28px rgba(0,0,0,.5);
+  font-size:11px;line-height:1.45;color:var(--gf-txt);pointer-events:none;opacity:0;transition:opacity .12s}
+#infotip.on{opacity:1}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.row>.card{animation:rise .4s both}
+
+/* row 0 — cost strip */
+#row-cost,#row-meter,#row-at-meter{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.tile{background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:9px 14px;animation:rise .4s both}
+.tile .tt{font-size:10px;text-transform:uppercase;letter-spacing:1.4px;color:var(--gf-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .tv{font-family:var(--font-data);font-size:24px;font-weight:700;line-height:1.25;color:var(--gf-gold)}
+.tile.energy .tv{color:var(--gf-bright)}
+.tile .ts{font-size:10px;color:var(--gf-dim);font-family:var(--font-data);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* row 1 — stat + sparkline cards */
+#row1 .stat{background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:9px 12px 6px;animation:rise .4s both;display:flex;flex-direction:column;min-height:126px}
+#row1 .st-t{font-size:10px;text-transform:uppercase;letter-spacing:1.3px;color:var(--gf-dim);
+  display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
+#row1 .st-v{font-family:var(--font-data);font-size:25px;font-weight:700;color:var(--gf-bright);
+  line-height:1.3;margin-top:2px;white-space:nowrap}
+#row1 .st-v small{font-size:12px;color:var(--gf-dim);font-weight:400;margin-left:2px}
+#row1 .st-s{font-size:9.5px;color:var(--gf-dim);margin-top:auto;padding-top:2px}
+.spark{width:100%;height:34px;display:block;margin-top:4px}
+
+/* row 2 — gauges + timeseries */
+.gauge{position:relative;width:150px;height:120px;flex:none}
+.gauge svg{width:150px;height:120px;display:block}
+.gauge .track{fill:none;stroke:var(--gf-track);stroke-width:9}
+.gauge .v{fill:none;stroke-width:9;stroke-dasharray:0 100;
+  transition:stroke-dasharray .7s cubic-bezier(.4,0,.2,1)}
+.gauge .v0{stroke:var(--gf-green)}
+.gauge .v1{stroke:var(--gf-gold)}
+.gauge .v2{stroke:var(--gf-red)}
+.gauge .num{position:absolute;left:0;right:0;top:52px;text-align:center;
+  font-family:var(--font-data);font-size:26px;font-weight:700}
+.gauge .gsub{position:absolute;left:0;right:0;top:84px;text-align:center;
+  font-size:11px;color:var(--gf-dim);text-transform:uppercase;letter-spacing:1px;
+  white-space:pre-line}
+.dual{display:flex;justify-content:space-around;align-items:center;height:100%;gap:4px}
+.dual .gauge{width:104px;height:87px}
+.dual .gauge svg{width:104px;height:87px}
+.dual .gauge .num{font-size:17px;top:37px}
+.dual .gauge .gsub{font-size:9px;top:63px}
+.gwrap{display:flex;align-items:center;justify-content:center;height:calc(100% - 24px)}
+
+/* timeseries */
+.tsbox{display:flex;flex-direction:column;height:100%}
+.tsbox canvas{width:100%;height:104px;display:block}
+.tsbox.tall canvas{height:120px}
+.lg{width:100%;border-collapse:collapse;margin-top:7px;font-size:10px;font-family:var(--font-data)}
+.lg th{font-weight:400;color:var(--gf-dim);text-align:right;padding:2px 6px 1px;
+  border-bottom:1px solid var(--gf-edge);font-size:9px;text-transform:uppercase;letter-spacing:.8px}
+.lg th:first-child{text-align:left}
+.lg td{padding:2.5px 6px;text-align:right;color:var(--gf-txt)}
+.lg td:first-child{text-align:left;color:var(--gf-dim);white-space:nowrap}
+.lg td i{display:inline-block;width:9px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.lg .dim{color:var(--gf-dim)}
+
+/* row 4 — spec decode by position */
+.sprow{display:flex;align-items:center;gap:8px;margin-top:7px}
+.sprow .spl{width:auto;max-width:74px;flex:none;font-size:10px;color:var(--gf-dim);font-family:var(--font-data);
+  text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sprow .spt{flex:1;height:12px;background:var(--gf-track);border-radius:3px;overflow:hidden}
+.sprow .spt.bare{display:none}
+.sprow .spb{display:block;height:100%;background:var(--gf-green);border-radius:3px;
+  transition:width .7s cubic-bezier(.4,0,.2,1)}
+.sprow .spv{width:64px;flex:none;text-align:right;font-size:11px;font-weight:600;
+  font-family:var(--font-data);color:var(--gf-green)}
+.spempty{color:var(--gf-dim);font-size:11px;font-style:italic;padding:10px 2px}
+/* journal branch — non-bar stats in a compact 2-col grid (no empty tracks) */
+.spgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 18px;margin-top:14px}
+.spgrid .sptile{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+  border-bottom:1px solid var(--gf-track);padding-bottom:3px}
+.spgrid .sptile .k{color:var(--gf-dim);font-size:10px;text-transform:uppercase;letter-spacing:.8px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spgrid .sptile .v{font-family:var(--font-data);font-weight:600;color:var(--gf-bright);
+  font-size:12.5px;white-space:nowrap}
+
+/* engine note (down / no metrics) */
+.note{padding:14px 16px;border-radius:var(--radius);border:1px dashed var(--gf-edge);
+  color:var(--gf-dim);font-size:12.5px;line-height:1.6}
+.note b{color:var(--gf-txt)}
+.note .mono{font-family:var(--font-data);color:var(--gf-blue)}
+
+/* gb10 hardware detail (kept from prior page) */
+.gpu-detail{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px}
+@media(max-width:900px){.gpu-detail{grid-template-columns:1fr}}
+.gd-row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 2px;
+  border-bottom:1px solid color-mix(in srgb,var(--gf-txt) 7%,transparent);font-size:12px}
+.gd-row:last-child{border-bottom:none}
+.gd-row .k{color:var(--gf-dim)}
+.gd-row .v{font-family:var(--font-data);font-weight:600}
+.gd-row .v small{color:var(--gf-dim);font-weight:400;font-size:11px}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;justify-content:center}
+.tpill{font-size:10px;font-family:var(--font-data);padding:3px 10px;border-radius:14px;
+  border:1px solid var(--gf-edge);color:var(--gf-dim);letter-spacing:.3px}
+.tpill.active{color:var(--gf-red);border-color:color-mix(in srgb,var(--gf-red) 50%,transparent);
+  background:color-mix(in srgb,var(--gf-red) 10%,transparent)}
+.throttles{margin-top:9px;display:flex;flex-direction:column;gap:4px}
+.throttle{display:flex;justify-content:space-between;font-size:11.5px}
+.throttle .k{color:var(--gf-dim)}
+.throttle .v{font-family:var(--font-data);font-weight:600}
+.throttle .v.hot{color:var(--gf-red)}
+.gauges4{display:flex;gap:14px;margin:2px 0 10px;flex-wrap:wrap}
+/* GB10 detail card: 8 gauges in a 2x4 grid (works at any width) */
+.gauges4.hw2x2{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 10px;
+  justify-items:center;margin:2px 0 12px}
+.gauges4.hw2x2 .gauge{width:100%;max-width:150px;height:136px;display:flex;flex-direction:column;align-items:center}
+.gauges4.hw2x2 .glbl{height:16px;line-height:16px;text-align:center;
+  font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;
+  color:var(--gf-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gauges4.hw2x2 .gauge svg{width:100%;max-width:150px}
+.gauges4.hw2x2 .gauge .num{font-size:19px;top:60px}
+.gauges4.hw2x2 .gauge .gsub{font-size:8.5px;top:90px}
+.chartgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:1100px){.chartgrid{grid-template-columns:repeat(2,1fr)}}
+/* top hardware over-time charts (2x2, beside the GB10 gauge card) */
+.hw2{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 14px;height:100%}
+.hw2 .chart-box{min-width:0}
+.hw2 .chart-head{margin-bottom:2px}
+.hw2 .chart-head .lbl{font-size:9px}
+.hw2 .chart-val{font-size:13px}
+.hw2 canvas{width:100%;height:calc(50% - 26px);min-height:44px;display:block;cursor:crosshair}
+/* hover popup: value at the hovered moment across all four charts */
+#hwtip{position:fixed;z-index:50;pointer-events:none;display:none;min-width:150px;
+  background:color-mix(in srgb,var(--gf-card) 92%,transparent);
+  border:1px solid var(--gf-edge);border-radius:8px;padding:7px 9px;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);backdrop-filter:blur(6px);font-family:var(--font-data)}
+#hwtip .tht{font-size:9.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--gf-dim);margin-bottom:5px}
+#hwtip .thr{display:flex;align-items:center;gap:6px;font-size:11px;padding:1px 0}
+#hwtip .thr i{width:8px;height:3px;border-radius:2px;display:inline-block;flex:none}
+#hwtip .thr .k{color:var(--gf-dim);flex:1;font-family:var(--font-ui);font-size:10px}
+#hwtip .thr .v{font-weight:700;color:var(--gf-bright);white-space:nowrap}
+.chart-box:hover .hwc{cursor:crosshair}
+/* top GB10 row: detail card (left) + over-time charts (right) */
+.rowhw{grid-template-columns:minmax(320px,5fr) minmax(0,9fr)}
+@media(max-width:900px){.rowhw{grid-template-columns:1fr}}
+.chart-box{min-width:0}
+.chart-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px}
+.chart-head .lbl{font-size:9.5px;text-transform:uppercase;letter-spacing:1.2px;color:var(--gf-dim)}
+.chart-val{font-size:15px;font-weight:700;font-family:var(--font-data)}
+canvas.hwc{width:100%;height:64px;display:block}
+.foot{margin-top:12px;color:var(--gf-dim);opacity:.65;font-size:10.5px;display:flex;
+  justify-content:space-between;flex-wrap:wrap;gap:8px}
+@media(max-width:1200px){
+  .r24{grid-template-columns:repeat(12,1fr)}
+  .s24-4,.s24-8{grid-column:span 12!important}
+  .r15{grid-template-columns:repeat(5,1fr)}
+  .s15-3{grid-column:span 5!important}
+  .gauges4.hw2x2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #row-cost{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:760px){
+  .r24,.r15,#row-cost{grid-template-columns:repeat(2,1fr)}
+  .s15-3,.s24-4,.s24-8,.s24-5,.s24-6{grid-column:span 2!important}
+}
+body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #row3,body.no-engage #row4{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>gx10</b></div>
+  <div class="tabs">
+    <a class="tab on" href="/metrics">metrics</a>
+    <a class="tab" href="/engines">engines</a>
+    <a class="tab" href="/settings">settings</a>
+  </div>
+  <div class="live" id="live"><i></i>live</div>
+  <div class="seg" id="seg">
+    <button data-w="120">2m</button>
+    <button data-w="300">5m</button>
+    <button data-w="600">10m</button>
+    <button data-w="900" class="on">15m</button>
+    <button data-w="3600">1h</button>
+    <button data-w="86400">24h</button>
+    <button data-w="604800">7d</button>
+  </div>
+  <span class="rr">auto-refresh 5s</span>
+</header>
+
+<div class="engstrip" id="engstrip">
+  <span class="edot off" id="eng-dot"></span>
+  <span class="eback unknown" id="eng-back" style="display:none"></span>
+  <span class="ename" id="eng-name">–</span>
+  <span class="epill" id="eng-pill">–</span>
+  <div class="seg" id="eng-seg" style="display:none"></div>
+  <span class="tmute" id="eng-note"></span>
+</div>
+
+<!-- row 0 — GB10 hardware: gauges (always real-time) + over-time charts (window) -->
+<div class="row rowhw" id="row0">
+  <div class="card hw-detail">
+    <h2>GB10 HARDWARE DETAIL <span class="info" data-tip="nvidia-smi + lm-sensors · gauges are always live, regardless of the selected timeframe · 15s cache · throttle counters accumulate since boot">i</span></h2>
+    <div class="gauges4 hw2x2" id="hw-gauges"></div>
+    <div class="gpu-detail" style="grid-template-columns:1fr;margin-top:6px">
+      <div class="gd-row"><span class="k">sm clock</span><span class="v" id="hw-clock">– <small id="hw-clock-max"></small></span></div>
+      <div class="pills" id="hw-pills"></div>
+      <div class="throttles" id="hw-counters"></div>
+    </div>
+  </div>
+  <div class="card hw-charts">
+    <h2>GB10 OVER TIME <span class="info" data-tip="GB10 hardware over the selected timeframe — hover any chart for the value at that moment (all four stay in sync)">i</span></h2>
+    <div class="hw2">
+      <div class="chart-box"><div class="chart-head"><span class="lbl">sm clock</span><span class="chart-val" id="gc-v">–</span></div><canvas class="hwc" id="c-clock"></canvas></div>
+      <div class="chart-box"><div class="chart-head"><span class="lbl">gpu temp</span><span class="chart-val" id="gt-v">–</span></div><canvas class="hwc" id="c-temp"></canvas></div>
+      <div class="chart-box"><div class="chart-head"><span class="lbl">power</span><span class="chart-val" id="gp-v">–</span></div><canvas class="hwc" id="c-power"></canvas></div>
+      <div class="chart-box"><div class="chart-head"><span class="lbl">throttle</span><span class="chart-val" id="gh-v">–</span></div><canvas class="hwc" id="c-throttle"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<!-- row 1 — token volume & rate -->
+<div class="row r15" id="row1">
+  <div class="stat s15-3"><div class="st-t">TOTAL TOKENS (RANGE) <span class="info" data-tip="increase(prompt + predicted tokens) over the window">i</span></div>
+    <div class="st-v" id="st-tok-total">–</div><canvas class="spark" id="spark-tok-total"></canvas>
+    <div class="st-s">total tokens</div></div>
+  <div class="stat s15-3"><div class="st-t">OUTPUT TOKENS (RANGE) <span class="info" data-tip="increase(predicted tokens) over the window">i</span></div>
+    <div class="st-v" id="st-tok-out">–</div><canvas class="spark" id="spark-tok-out"></canvas>
+    <div class="st-s">output tokens</div></div>
+  <div class="stat s15-3"><div class="st-t">INPUT TOKENS (RANGE) <span class="info" data-tip="increase(prompt tokens) over the window">i</span></div>
+    <div class="st-v" id="st-tok-in">–</div><canvas class="spark" id="spark-tok-in"></canvas>
+    <div class="st-s">input tokens</div></div>
+  <div class="stat s15-3"><div class="st-t">TOTAL TOKENS / SEC <span class="info" data-tip="rate(prompt + predicted tokens) — prompt+output combined">i</span></div>
+    <div class="st-v" id="st-tps-total">–</div><canvas class="spark" id="spark-tps-total"></canvas>
+    <div class="st-s">tokens/sec · total</div></div>
+  <div class="stat s15-3"><div class="st-t">OUTPUT TOKENS / SEC <span class="info" data-tip="rate(predicted tokens) — decode throughput">i</span></div>
+    <div class="st-v" id="st-tps-out">–</div><canvas class="spark" id="spark-tps-out"></canvas>
+    <div class="st-s">output/sec</div></div>
+</div>
+
+<!-- row 2 — cache + latency + concurrency -->
+<div class="row r24" id="row2">
+  <div class="card s24-4"><h2>KV CACHE USED <span class="info" data-tip="fraction of the KV cache in use (vllm:kv_cache_usage_perc). llama.cpp does not expose this.">i</span></h2>
+    <div class="gwrap"><div id="g-kv-slot"></div></div></div>
+  <div class="card s24-4"><h2>PREFIX CACHE HIT % <span class="info" data-tip="cache hits / (hits + queries) over the window — share of prompt tokens served from the prefix cache">i</span></h2>
+    <div class="gwrap"><div id="g-ph-slot"></div></div></div>
+  <div class="card s24-8"><h2>TIME TO FIRST TOKEN P50 / P95 / P99 <span class="info" data-tip="per-request latency to the first token. vLLM: histogram percentiles per tick. llama.cpp: instantaneous prompt-seconds gauge (p50=p95=p99).">i</span></h2>
+    <div class="tsbox"><canvas id="c-ttft"></canvas><div id="lg-ttft"></div></div></div>
+  <div class="card s24-8"><h2>REQUEST HOPPER: RUNNING / WAITING / SWAPPED <span class="info" data-tip="continuous-batching scheduler: requests running vs waiting in the queue (gauges). Swapped not exposed.">i</span></h2>
+    <div class="tsbox"><canvas id="c-hop"></canvas><div id="lg-hop"></div></div></div>
+</div>
+
+<!-- row 3 — host + spec + output tps -->
+<div class="row r24" id="row3">
+  <div class="card s24-4"><h2>MEMORY UTILIZATION <span class="info" data-tip="Left: host RAM (used/total from /proc/meminfo). Right: model VRAM on the unified GB10 pool (nvidia-smi process memory / total).">i</span></h2>
+    <div class="dual" id="g-mem-slot"></div></div>
+  <div class="card s24-4"><h2>CPU UTILIZATION <span class="info" data-tip="host CPU busy % (1 − idle, /proc/stat delta)">i</span></h2>
+    <div class="gwrap"><div id="g-cpu-slot"></div></div></div>
+  <div class="card s24-4"><h2>ROOT DISK UTILIZATION <span class="info" data-tip="Left: / space used %. Right: / inode usage %">i</span></h2>
+    <div class="dual" id="g-dsk-slot"></div></div>
+  <div class="card s24-4"><h2>SPEC DECODE ACCEPTANCE <span class="info" data-tip="speculative-decode accepted tokens / drafted tokens over the window">i</span></h2>
+    <div class="gwrap"><div id="g-spec-slot"></div></div></div>
+  <div class="card s24-8"><h2>OUTPUT TOKENS / SEC OVER TIME <span class="info" data-tip="rate(predicted tokens) per tick — decode throughput over the window">i</span></h2>
+    <div class="tsbox tall"><canvas id="c-otps"></canvas><div id="lg-otps"></div></div></div>
+</div>
+
+<!-- row 4 — throughput mix + acceptance depth -->
+<div class="row r24" id="row4">
+  <div class="card s24-8"><h2>TOKEN THROUGHPUT OVER TIME <span class="info" data-tip="rate(prompt + predicted tokens) per tick — total tokens/sec (prompt-heavy workloads spike here)">i</span></h2>
+    <div class="tsbox tall"><canvas id="c-tt"></canvas><div id="lg-tt"></div></div></div>
+  <div class="card s24-8"><h2>PROMPT VS OUTPUT TOKEN MIX <span class="info" data-tip="prompt tokens/sec (green area) vs output tokens/sec (orange line) on the same axis">i</span></h2>
+    <div class="tsbox tall"><canvas id="c-mix"></canvas><div id="lg-mix"></div></div></div>
+  <div class="card s24-8"><h2><span id="sp-title">SPEC DECODE ACCEPTANCE BY POSITION</span> <span class="info" id="sp-info" data-tip="vLLM: accepted/drafted per draft position (the decay curve across speculative depth). llama.cpp: per-task acceptance from the journal (covers MTP / DSpark / DFlash / EAGLE-3 / n-gram) with window detail.">i</span></h2>
+    <div id="sp-wrap"></div></div>
+</div>
+
+<!-- dynamic cost row: cloud $/token tiers vs DGX energy (window-scoped) -->
+<div class="row" id="row-cost" style="display:none">
+  <div class="tile" id="tile-sku0"><div class="tt" id="tt-sku0">–</div><div class="tv" id="tv-sku0">–</div><div class="ts" id="ts-sku0"></div></div>
+  <div class="tile" id="tile-sku1"><div class="tt" id="tt-sku1">–</div><div class="tv" id="tv-sku1">–</div><div class="ts" id="ts-sku1"></div></div>
+  <div class="tile" id="tile-sku2"><div class="tt" id="tt-sku2">–</div><div class="tv" id="tv-sku2">–</div><div class="ts" id="ts-sku2"></div></div>
+</div>
+
+<!-- fixed meter row: today cloud costs + all-time (never follows the window picker) -->
+<div class="row" id="row-meter" style="display:none">
+  <div class="tile"><div class="tt">TODAY · ULTRA CLOUD</div><div class="tv" id="tv-today-ultra">–</div><div class="ts" id="ts-today-u"></div></div>
+  <div class="tile"><div class="tt">TODAY · MID CLOUD</div><div class="tv" id="tv-today-mid">–</div><div class="ts" id="ts-today-m"></div></div>
+  <div class="tile"><div class="tt">TODAY · LOW CLOUD</div><div class="tv" id="tv-today-low">–</div><div class="ts" id="ts-today-l"></div></div>
+  <div class="tile energy"><div class="tt">TODAY · DGX ENERGY <span class="info" data-tip="kWh since local midnight — trapezoid integral of measured GPU power over every power sample today × $/kWh tariff. Gaps (box off / dashboard down) are NOT billed">i</span></div><div class="tv" id="tv-today-energy">–</div><div class="ts" id="ts-today-e"></div></div>
+</div>
+
+<!-- all-time detail meters + cumulative chart -->
+<div class="row" id="row-at-meter" style="display:none">
+    <div class="tile"><div class="tt">ALL-TIME TOKENS <span class="info" data-tip="lifetime prompt + generated tokens, from a cumulative ledger that survives engine restarts and the 14d history prune">i</span></div><div class="tv" id="tv-at-tok">–</div><div class="ts" id="ts-at-tok"></div></div>
+    <div class="tile"><div class="tt">ALL-TIME ENERGY</div><div class="tv" id="tv-at-kwh">–</div><div class="ts" id="ts-at-kwh"></div></div>
+    <div class="tile energy"><div class="tt">ALL-TIME COST <span class="info" data-tip="lifetime electricity cost: measured GPU energy × your configured $/kWh tariff. The token-tier equivalent is shown as context only">i</span></div><div class="tv" id="tv-at-cost">–</div><div class="ts" id="ts-at-since"></div></div>
+</div>
+<div class="row" id="row-models" style="display:none">
+  <div class="card s24-8"><h2>TOKENS BY MODEL <span class="info" data-tip="lifetime in/out tokens per model, from the ledger. Switching models on a port starts that model's own counter; engine restarts don't reset it.">i</span></h2>
+    <div class="row" id="row-models-grid" style="display:flex;flex-wrap:wrap;gap:12px;padding:0 14px 14px"></div>
+  </div>
+</div>
+
+<!-- gb10 hardware moved to top (row0) -->
+
+<div class="foot">
+  <span>scraped directly from engine <span class="tmute">/metrics</span> · 2s poll · history in sqlite (14d) · no prometheus</span>
+  <span id="src-note"></span>
+</div>
+
+<script>
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/[&<>\"]/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function cssVar(name){return getComputedStyle(document.documentElement).getPropertyValue(name).trim();}
+
+/* ── grafana-style line chart: straight segments, grid lines,
+      no dots, optional 12% area fill, nulls break the line ── */
+function draw(cv,series,opts){
+  opts=opts||{};
+  var dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  if(!W||!H)return;
+  cv.width=W*dpr;cv.height=H*dpr;
+  var x=cv.getContext('2d');x.scale(dpr,dpr);x.clearRect(0,0,W,H);
+  /* grid */
+  x.strokeStyle='rgba(154,163,178,.10)';x.lineWidth=1;
+  [0.25,0.5,0.75].forEach(function(f){
+    var y=Math.round(H*f)+0.5;
+    x.beginPath();x.moveTo(0,y);x.lineTo(W,y);x.stroke();
+  });
+  if(!series||!series.length)return;
+  var all=[];
+  for(var i=0;i<series.length;i++)for(var j=0;j<series[i].data.length;j++){
+    var v0=series[i].data[j];if(v0!=null)all.push(v0);
+  }
+  if(!all.length)return;
+  var mn=opts.min!=null?opts.min:Math.min.apply(null,all);
+  var mx=opts.max!=null?opts.max:Math.max.apply(null,all);
+  if(mx-mn<1e-9)mx=mn+1;
+  var n=Math.max.apply(null,series.map(function(s){return s.data.length;}));
+  var step=n>1?W/(n-1):0;
+  for(var k=0;k<series.length;k++){
+    var s=series[k];
+    var col=opts.colors?opts.colors[k%opts.colors.length]:(cssVar('--gf-green')||'#22c55e');
+    var pts=[];
+    for(var i2=0;i2<s.data.length;i2++){
+      var v=s.data[i2];
+      if(v==null)continue;
+      pts.push([i2*step,H-((v-mn)/(mx-mn))*(H-6)-3]);
+    }
+    if(!pts.length)continue;
+    x.beginPath();
+    x.moveTo(pts[0][0],pts[0][1]);
+    for(var r=1;r<pts.length;r++)x.lineTo(pts[r][0],pts[r][1]);
+    x.strokeStyle=col;x.lineWidth=1.5;x.stroke();
+    if(opts.fill!==false&&series.length===1){
+      x.lineTo((s.data.length-1)*step,H);x.lineTo(0,H);x.closePath();
+      var gr=x.createLinearGradient(0,0,0,H);
+      gr.addColorStop(0,col+'2e');gr.addColorStop(1,col+'05');
+      x.fillStyle=gr;x.fill();
+    }
+  }
+  /* crosshair: vertical line at the hovered x (synchronized across charts) */
+  if(opts.crosshair!=null&&opts.crosshair>=0&&opts.crosshair<=W){
+    x.strokeStyle='rgba(255,255,255,.45)';x.lineWidth=1;
+    x.setLineDash([3,3]);
+    var cx=Math.round(opts.crosshair)+0.5;
+    x.beginPath();x.moveTo(cx,0);x.lineTo(cx,H);x.stroke();
+    x.setLineDash([]);
+  }
+}
+
+/* ── grafana arc gauge: 240° arc (210°..-30°), 3 threshold bands ── */
+var ARC_D='M18.43 84 A48 48 0 1 1 101.57 84';
+function gaugeShell(id,kind){
+  return '<div class="gauge" id="'+id+'">'
+    +'<svg viewBox="0 0 120 92">'
+    +'<path class="track" d="'+ARC_D+'" pathLength="100"/>'
+    +'<path class="v v0" d="'+ARC_D+'" pathLength="100"/>'
+    +'<path class="v v1" d="'+ARC_D+'" pathLength="100"/>'
+    +'<path class="v v2" d="'+ARC_D+'" pathLength="100"/>'
+    +'</svg>'
+    +'<div class="num" id="gv-'+id+'">–</div>'
+    +'<div class="gsub" id="gs-'+id+'"></div></div>';
+}
+/* bands per kind: [start, end] in % — v0 green, v1 amber, v2 red */
+var BANDS={
+  'warn-high':[[0,80],[80,95],[95,100]],   /* kv, disk: green→amber→red as it fills */
+  'ok':[[0,100]],                            /* prefix hit, spec accept: high = good */
+  'bad':[[0,100]],                           /* throttle: red when active */
+  'cool':[[0,60],[60,85],[85,100]],         /* cpu: low = cool green */
+  'flat':[[0,100]]
+};
+function setArc(id,pct,kind,text,sub){
+  var el=$(id);if(!el)return;
+  var bands=BANDS[kind]||BANDS['flat'];
+  for(var i=0;i<3;i++){
+    var p=el.querySelectorAll('.v')[i];
+    if(i>=bands.length){p.style.strokeDasharray='0 100';continue;}
+    var b=bands[i];
+    var L=pct==null?0:Math.max(0,Math.min(pct,b[1])-b[0]);
+    p.style.strokeDasharray=L.toFixed(2)+' 100';
+    p.style.strokeDashoffset=String(-b[0]);
+  }
+  setText('gv-'+id,text==null?'–':text);
+  setText('gs-'+id,sub||'');
+}
+
+/* ── formatters ── */
+function fmt1(v,d){return v==null?'–':Number(v).toFixed(d==null?1:d);}
+function fmtTok(v){
+  if(v==null)return '–';
+  v=Number(v);
+  if(v>=1e9)return (v/1e9).toFixed(2)+'B';
+  if(v>=1e6)return (v/1e6).toFixed(v>=1e7?0:1)+'M';
+  if(v>=1e3)return (v/1e3).toFixed(v>=1e4?0:1)+'k';
+  return String(Math.round(v));
+}
+function fmtTpsInt(v){return v==null?'–':Math.round(v)+' tps';}
+function fmtTps1(v){return v==null?'–':Number(v).toFixed(1)+' tps';}
+function fmtSec(v){
+  if(v==null)return '–';
+  if(v<1)return (v*1000).toFixed(0)+' ms';
+  return v.toFixed(2)+' s';
+}
+function fmtUs(us){
+  if(us==null)return '0 s';
+  var s=us/1e6;
+  if(s<90)return s.toFixed(0)+' s';
+  if(s<5400)return (s/60).toFixed(1)+' min';
+  if(s<172800)return (s/3600).toFixed(1)+' h';
+  return (s/86400).toFixed(1)+' d';
+}
+function fmtBps(v){
+  if(v==null||v<=0)return '0 B/s';
+  var u=['B/s','KB/s','MB/s','GB/s'],i=0;
+  while(v>=1024&&i<3){v/=1024;i++;}
+  return v.toFixed(v>=100?0:1)+' '+u[i];
+}
+function fmtLink(mbps){
+  if(mbps==null)return '–';
+  return mbps>=1000?(mbps/1000).toFixed(mbps%1000?1:0)+' Gb/s':mbps+' Mb/s';
+}
+function fmtDurS(s){
+  if(s==null)return '–';
+  s=Math.max(0,Math.round(s));
+  var h=Math.floor(s/3600),m=Math.floor(s%3600/60),d=s%60;
+  if(h)return h+'h '+m+'m';
+  if(m)return m+'m '+d+'s';
+  return d+'s';
+}
+/* currency: visual-only symbol from config cost.currency (USD='$', EUR='€').
+   No FX conversion — prices are whatever the user entered in settings. */
+var CUR='USD';
+function sym(){return CUR==='EUR'?'€':'$';}
+function setCurrency(c){if(c==='EUR'||c==='USD')CUR=c;}
+function fmtMoney(v){return v==null?'–':sym()+Number(v).toFixed(2);}
+function mean(arr){
+  if(!arr||!arr.length)return null;
+  var n=0,s=0;
+  for(var i=0;i<arr.length;i++){if(arr[i]!=null){s+=arr[i];n++;}}
+  return n?s/n:null;
+}
+function maxOf(arr){
+  if(!arr||!arr.length)return null;
+  var m=null;
+  for(var i=0;i<arr.length;i++)if(arr[i]!=null&&(m==null||arr[i]>m))m=arr[i];
+  return m;
+}
+function last(arr){
+  if(!arr||!arr.length)return null;
+  for(var i=arr.length-1;i>=0;i--)if(arr[i]!=null)return arr[i];
+  return null;
+}
+function sumSeries(a,b){
+  var n=Math.max(a?a.length:0,b?b.length:0),out=[];
+  for(var i=0;i<n;i++){
+    var x=a?a[i]:null,y=b?b[i]:null;
+    out.push((x!=null&&y!=null)?x+y:(x!=null?x:(y!=null?y:null)));
+  }
+  return out;
+}
+
+/* ── state ────────────────────────────────────────────────── */
+var WIN=900;            // seconds; >=3600 means history (sqlite)
+var busy=false;
+var selPort=null;       // selected live engine (null = first)
+var lastEngKey='';      // engine-set shape -> rebuild strip only on change
+var rendered={};        // id -> last textContent (flicker-free diffing)
+var renderedIn={};      // id -> last innerHTML
+function setText(id,txt){
+  txt=String(txt);
+  if(rendered[id]===txt)return;
+  rendered[id]=txt;
+  var el=$(id);if(el)el.textContent=txt;
+}
+function setInner(id,html){
+  if(renderedIn[id]===html)return;
+  renderedIn[id]=html;
+  var el=$(id);if(el)el.innerHTML=html;
+}
+
+document.querySelectorAll('#seg button').forEach(function(b){
+  b.addEventListener('click',function(){
+    WIN=parseInt(b.getAttribute('data-w'),10);
+    document.querySelectorAll('#seg button').forEach(function(x){x.classList.remove('on');});
+    b.classList.add('on');
+    if(!busy)fetchData();
+  });
+});
+
+function setLive(ok,msg){
+  var el=$('live');
+  el.classList.toggle('bad',!ok);
+  el.innerHTML='<i></i>'+(ok?'live':'stale · '+esc(msg||''));
+}
+
+/* ── gauge shells (built once) ────────────────────────────── */
+var shellsBuilt=false;
+function buildShells(){
+  if(shellsBuilt)return;
+  shellsBuilt=true;
+  $('g-kv-slot').innerHTML=gaugeShell('g-kv','warn-high');
+  $('g-ph-slot').innerHTML=gaugeShell('g-ph','ok');
+  $('g-cpu-slot').innerHTML=gaugeShell('g-cpu','cool');
+  $('g-spec-slot').innerHTML=gaugeShell('g-spec','ok');
+  $('g-mem-slot').innerHTML=gaugeShell('g-mema','warn-high')+gaugeShell('g-memb','warn-high');
+  $('g-dsk-slot').innerHTML=gaugeShell('g-dska','warn-high')+gaugeShell('g-dskb','flat');
+  /* hw card gauges */
+  var svg='<svg viewBox="0 0 120 92">'
+    +'<path class="track" d="'+ARC_D+'" pathLength="100"/>'
+    +'<path class="v v0" d="'+ARC_D+'" pathLength="100"/>'
+    +'<path class="v v1" d="'+ARC_D+'" pathLength="100"/>'
+    +'<path class="v v2" d="'+ARC_D+'" pathLength="100"/>'
+    +'</svg>';
+  var hw='';
+  [['gc-g-smc','sm clock'],['gc-g-gpt','gpu temp'],['gc-g-gpw','power'],['gc-g-gut','gpu util'],
+   ['gc-g-nvm','nvme'],['gc-g-net','net rx+tx'],['gc-g-swp','swap'],['gc-g-thr','throttle']].forEach(function(g){
+    hw+='<div class="gauge" id="'+g[0]+'"><div class="glbl">'+g[1]+'</div>'+svg
+      +'<div class="num" id="gv-'+g[0]+'">–</div><div class="gsub" id="gs-'+g[0]+'"></div></div>';
+  });
+  $('hw-gauges').innerHTML=hw;
+}
+
+/* ── legend table (Grafana calcs: Name | Last | Mean | Max) ── */
+function setLegend(id,rows,fmt){
+  fmt=fmt||function(v){return v==null?'–':v;};
+  if(!rows||!rows.length){setInner(id,'<div class="lg-note tmute" style="font-size:10px;padding:4px 2px">no data in window</div>');return;}
+  var h='<table class="lg"><tr><th>name</th><th>last</th><th>mean</th><th>max</th></tr>';
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i];
+    var f=r.fmt||fmt;   /* per-row formatter wins (fmtSec/fmtTps1/…) — without this the identity fmt leaked raw floats */
+    h+='<tr><td><i style="background:'+r.color+'"></i>'+esc(r.name)+'</td>'
+      +'<td>'+(r.last==null?'<span class="dim">–</span>':f(r.last))+'</td>'
+      +'<td>'+(r.mean==null?'<span class="dim">–</span>':f(r.mean))+'</td>'
+      +'<td>'+(r.mx==null?'<span class="dim">–</span>':f(r.mx))+'</td></tr>';
+  }
+  setInner(id,h+'</table>');
+}
+function legendRow(name,color,data,fmt){
+  return {name:name,color:color,last:last(data),mean:mean(data),mx:maxOf(data),fmt:fmt};
+}
+
+/* ── engine strip ─────────────────────────────────────────── */
+function stripName(e){
+  /* model_cmdline (real --model filename from the process scan) beats the
+     config label — llama.cpp emits no model_name label, so without this the
+     strip falls back to the unit name. */
+  var nm=e.model_cmdline||e.model||e.label||(':'+e.port);
+  return {full:nm,short:nm.length>30?nm.slice(0,29)+'…':nm};
+}
+function chipLabel(e){
+  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang')?e.backend:'?';
+  var nm=stripName(e).short;
+  return b+' · '+esc(nm)+' · :'+e.port+(e.has_metrics?'':' · no metrics');
+}
+function renderStrip(list,sel){
+  var key=list.map(function(e){return e.port+':'+(e.has_metrics?1:0)+':'+(e.up?1:0)+':'+(e.backend||'');}).join(',');
+  if(key!==lastEngKey){
+    lastEngKey=key;
+    if(list.length>1){
+      $('eng-seg').style.display='';
+      $('eng-seg').innerHTML=list.map(function(e){
+        return '<button data-p="'+e.port+'" title="'+esc(stripName(e).full)+' · :'+e.port+'">'+chipLabel(e)+'</button>';
+      }).join('');
+      $('eng-seg').querySelectorAll('button').forEach(function(b){
+        b.addEventListener('click',function(){
+          selPort=parseInt(b.getAttribute('data-p'),10);
+          fetchData();
+        });
+      });
+    }else{
+      $('eng-seg').style.display='none';
+    }
+  }
+  /* mark selected + fill labels */
+  var eng=sel||list[0];
+  $('eng-seg').querySelectorAll('button').forEach(function(b){
+    b.classList.toggle('on',parseInt(b.getAttribute('data-p'),10)===(eng?eng.port:0));
+  });
+  var eb=$('eng-back');
+  if(!eng){
+    $('eng-dot').classList.add('off');
+    eb.style.display='none';
+    setText('eng-name','no engine');
+    var ep=$('eng-pill');ep.textContent='–';ep.className='epill';
+    setText('eng-note','no live engine — down engines are tracked on the engines page');
+    return;
+  }
+  $('eng-dot').classList.remove('off');
+  eb.textContent=(eng.backend||'unknown').toUpperCase();
+  eb.className='eback '+(eng.backend||'unknown');
+  eb.style.display='';
+  var nm=stripName(eng);
+  var en=$('eng-name');
+  en.textContent=nm.short+' · :'+eng.port;
+  en.title=nm.full+' · :'+eng.port;
+  var ep2=$('eng-pill');
+  ep2.textContent=eng.up?'live':'down';
+  ep2.className='epill '+(eng.up?'on':'off');
+  var others=list.length-1;
+  setText('eng-note',others>0?others+' more engine'+(others>1?'s':'')+' — pick one':'scrape 2s · window '+(WIN>=3600?'history':'live'));
+}
+
+/* ── row 0: cost ──────────────────────────────────────────── */
+function renderCost(cost){
+  var row=$('row-cost');
+  if(!cost||(!cost.skus&&!cost.energy_usd)){row.style.display='none';return;}
+  row.style.display='';
+  for(var i=0;i<3;i++){
+    var s=cost.skus&&cost.skus[i];
+    var tile=$('tile-sku'+i);
+    if(!s){tile.style.display='none';continue;}
+    tile.style.display='';
+    setText('tt-sku'+i,s.name.toUpperCase());
+    setText('tv-sku'+i,fmtMoney(s.usd));
+    setText('ts-sku'+i,sym()+Number(s.in_price).toFixed(2)+' in · '+sym()+Number(s.out_price).toFixed(2)+' out / Mtok');
+  }
+}
+
+/* ── today + all-time meters (window-independent) ────────── */
+function renderMeters(d){
+  var ct=d.cost_today, at=d.alltime;
+  var meter=$('row-meter'), atmeter=$('row-at-meter'), mrow=$('row-models');
+  if(!ct&&!at){meter.style.display='none';atmeter.style.display='none';mrow.style.display='none';return;}
+  meter.style.display='';
+  if(at)atmeter.style.display='';
+  if(ct){
+    var skus=ct.skus||[];
+    var ultra=skus.find(function(s){return /ultra/i.test(s.name);})||skus[0];
+    var mid=skus.find(function(s){return /mid/i.test(s.name);})||skus[1];
+    var low=skus.find(function(s){return /low/i.test(s.name);})||skus[2];
+    setText('tv-today-ultra',ultra?fmtMoney(ultra.usd):'–');
+    setText('tv-today-mid',mid?fmtMoney(mid.usd):'–');
+    setText('tv-today-low',low?fmtMoney(low.usd):'–');
+    var tokSub='since local midnight · '+fmtTok(ct.in_tokens)+' in · '+fmtTok(ct.out_tokens)+' out';
+    setText('ts-today-u',tokSub);
+    setText('ts-today-m',tokSub);
+    setText('ts-today-l',tokSub);
+    if(ct.energy_usd!=null){
+      setText('tv-today-energy',fmtMoney(ct.energy_usd));
+      setText('ts-today-e',(ct.energy_kwh!=null?ct.energy_kwh.toFixed(4):'–')+' kWh'
+        +(ct.usd_per_kwh!=null?' · '+sym()+Number(ct.usd_per_kwh).toFixed(2)+'/kWh':''));
+    }else{
+      setText('tv-today-energy',ct.energy_kwh!=null?ct.energy_kwh.toFixed(4)+' kWh':'–');
+      setText('ts-today-e','since local midnight');
+    }
+  }else{
+    setText('tv-today-ultra','–');setText('ts-today-u','');
+    setText('tv-today-mid','–');setText('ts-today-m','');
+    setText('tv-today-low','–');setText('ts-today-l','');
+    setText('tv-today-energy','–');setText('ts-today-e','');
+  }
+  if(at){
+    setText('tv-at-tok',fmtTok(at.in_tokens+at.out_tokens));
+    setText('ts-at-tok',fmtTok(at.in_tokens)+' in · '+fmtTok(at.out_tokens)+' out');
+    setText('tv-at-kwh',(at.energy_kwh!=null?at.energy_kwh.toFixed(2):'–')+' kWh');
+    var tokUsd=null, tier='';
+    if(at.skus&&at.skus[0]){tokUsd=at.skus[0].usd;tier=at.skus[0].name;}
+    if(at.energy_usd!=null){
+      setText('tv-at-cost',fmtMoney(at.energy_usd));
+      setText('ts-at-since','electricity only · '+sym()+(at.usd_per_kwh!=null?at.usd_per_kwh.toFixed(2):'?')+'/kWh');
+    }else{
+      setText('tv-at-cost',tokUsd!=null?fmtMoney(tokUsd):'–');
+      setText('ts-at-since',at.since_ts?'since '+new Date(at.since_ts*1000).toLocaleDateString():'');
+    }
+    var mgrid=$('row-models-grid'), models=(at&&at.models)||[];
+    if(models.length){
+      mrow.style.display='';
+      setInner('row-models-grid',models.map(function(m){
+        return '<div class="tile" style="min-width:200px;flex:1;position:relative">'
+          +'<button title="remove this model from the ledger" data-model="'+esc(m.model)+'"'
+          +' style="position:absolute;top:6px;right:6px;background:none;border:1px solid var(--card-edge);'
+          +'border-radius:6px;color:var(--dim);font-size:10px;padding:1px 6px;cursor:pointer"'
+          +' onmouseover="this.style.color=\'var(--bad)\'" onmouseout="this.style.color=\'var(--dim)\'">✕</button>'
+          +'<div class="tt">'+esc(m.model)+'</div>'
+          +'<div class="tv">'+fmtTok(m.in_tokens+m.out_tokens)+'</div>'
+          +'<div class="ts">'+fmtTok(m.in_tokens)+' in · '+fmtTok(m.out_tokens)+' out</div>'
+          +'</div>';
+      }).join(''));
+      var dels=mgrid.querySelectorAll('button[data-model]');
+      for(var di=0;di<dels.length;di++){
+        dels[di].addEventListener('click',function(ev){modelDelModal(ev.target.getAttribute('data-model'));});
+      }
+    }else{
+      mrow.style.display='none';
+    }
+  }
+}
+
+/* ── panel data resolution: live vs history keys ─────────── */
+function seriesKeys(e,hist){
+  var sr=e.series||{};
+  return {
+    out:hist?(sr.out_tps||[]):(sr.output_per_s||[]),
+    inn:hist?(sr.in_tps||[]):(sr.input_per_s||[]),
+    total:hist?(sr.total_tps||sumSeries(sr.in_tps||[],sr.out_tps||[])):sumSeries(sr.input_per_s||[],sr.output_per_s||[]),
+    kv:hist?(sr.kv_pct||[]):(sr.kv_pct||[]),
+    ph:hist?(sr.prefix_hit_rate||[]):(sr.prefix_hit_rate||[]),
+    sa:hist?(sr.spec_acceptance||[]):(sr.spec_acceptance||[]),
+    ttft50:hist?(sr.ttft_p50||[]):(sr.ttft_p50||[]),
+    ttft95:hist?(sr.ttft_p95||[]):(sr.ttft_p95||[]),
+    ttft99:hist?(sr.ttft_p99||[]):(sr.ttft_p99||[]),
+    ttftInst:hist?null:(sr.ttft||null),
+    run:hist?null:(sr.running||[]),
+    wait:hist?null:(sr.waiting||[])
+  };
+}
+function rangeTokens(e,hist,d){
+  var s=e.stats||{};
+  if(!hist){
+    var it=s.in_tokens,ot=s.out_tokens;
+    if(it==null&&ot==null)return {inn:null,out:null,total:s.total_tokens};
+    it=it||0;ot=ot||0;
+    return {inn:it,out:ot,total:s.total_tokens!=null?it+ot:(s.total_tokens)};
+  }
+  /* History: the range-total tiles must show the TRUE window total, which is
+     the backend's unstrided SUM (d.tokens, same port-scoped value the cost
+     strip bills against). Summing the strided chart series (sr.in/out_tokens)
+     undercounts — decimation drops every Nth 30s bucket. The sparklines
+     (K.inn/out/total) intentionally stay on the strided series. */
+  if(d&&d.tokens&&d.tokens.in_tokens!=null){
+    var it2=d.tokens.in_tokens||0,ot2=d.tokens.out_tokens||0;
+    return {inn:it2,out:ot2,total:it2+ot2};
+  }
+  var sr=e.series||{},it=0,ot=0,si=sr.in_tokens||[],so=sr.out_tokens||[];
+  for(var i=0;i<si.length;i++)if(si[i]!=null)it+=si[i];
+  for(var j=0;j<so.length;j++)if(so[j]!=null)ot+=so[j];
+  return {inn:si.length?it:null,out:so.length?ot:null,total:(si.length||so.length)?it+ot:null};
+}
+function val(live,histMean){
+  if(histMean!=null)return histMean;
+  return live;
+}
+
+/* ── main panel render (in-place updates only) ────────────── */
+var GREEN='#22c55e',ORANGE='#fb923c',RED='#ef4444',GOLD='#eab308',BLUE='#60a5fa',DIM='#9aa3b2';
+function renderPanels(eng,hist,d){
+  var p=eng.port,s=eng.stats||{},K=seriesKeys(eng,hist);
+  var tok=rangeTokens(eng,hist,d);
+  /* row 1 — stats + sparklines */
+  setText('st-tok-total',fmtTok(tok.total));
+  setText('st-tok-out',fmtTok(tok.out));
+  setText('st-tok-in',fmtTok(tok.inn));
+  var tpsTotal=hist?mean(K.total):((s.tokens_per_s_now!=null)?s.tokens_per_s_now:((s.tokens_per_s!=null)?s.tokens_per_s:mean(K.total)));
+  var tpsOut=hist?mean(K.out):((s.output_per_s_now!=null)?s.output_per_s_now:((s.output_per_s!=null)?s.output_per_s:mean(K.out)));
+  setText('st-tps-total',fmtTpsInt(tpsTotal));
+  setText('st-tps-out',fmtTps1(tpsOut));
+  draw($('spark-tok-total'),[{data:K.total}],{fill:true,colors:[GREEN],min:0});
+  draw($('spark-tok-out'),[{data:K.out}],{fill:true,colors:[GREEN],min:0});
+  draw($('spark-tok-in'),[{data:K.inn}],{fill:true,colors:[GREEN],min:0});
+  draw($('spark-tps-total'),[{data:K.total}],{fill:true,colors:[GREEN],min:0});
+  draw($('spark-tps-out'),[{data:K.out}],{fill:true,colors:[GREEN],min:0});
+  /* row 2 — kv / prefix / ttft / hopper */
+  var kv=hist?mean(K.kv):s.kv_pct;
+  /* kv is 0-100 (vLLM kv_cache_usage_perc; llama.cpp /slots used/total*100) */
+  setArc('g-kv',kv==null?null:Math.max(0,Math.min(100,kv)),'warn-high',
+    kv==null?'–':Math.round(kv)+'%',kv==null?'no kv metric':'of kv cache');
+  var ph=hist?mean(K.ph):s.prefix_hit_rate;
+  setArc('g-ph',ph,'ok',ph==null?'–':Number(ph).toFixed(1)+'%',ph==null?'no traffic':'hits / queries');
+  /* ttft chart */
+  var ttRows=null;
+  if(K.ttft50.length&&K.ttft50.some(function(v){return v!=null;})){
+    var lines=[];
+    if(!hist){
+      lines=[{d:K.ttft50,c:GREEN,n:'p50'},{d:K.ttft95,c:ORANGE,n:'p95'},{d:K.ttft99,c:RED,n:'p99'}];
+    }else{
+      /* History: rows written before the ttft_p99 migration are all-null
+         there (include only if it has data). llama.cpp stores ONE
+         instantaneous mean in all three columns — collapse identical
+         series so we don't draw three overlapping "percentiles". */
+      lines=[{d:K.ttft50,c:GREEN,n:'p50'}];
+      var hasData=function(d){return d.some(function(v){return v!=null;});};
+      var same=function(a,b){return a.length===b.length&&a.every(function(v,i){
+        return v==null?b[i]==null:v===b[i];});};
+      if(hasData(K.ttft95)&&!same(K.ttft95,K.ttft50))
+        lines.push({d:K.ttft95,c:ORANGE,n:'p95'});
+      if(hasData(K.ttft99)&&!same(K.ttft99,K.ttft50)&&!same(K.ttft99,K.ttft95))
+        lines.push({d:K.ttft99,c:RED,n:'p99'});
+      if(lines.length===1){lines[0].n='ttft';lines[0].c=ORANGE;}
+    }
+    draw($('c-ttft'),lines.map(function(l){return {data:l.d};}),{min:0,colors:lines.map(function(l){return l.c;})});
+    ttRows=lines.map(function(l){return legendRow(l.n,l.c,l.d,fmtSec);});
+  }else if(K.ttftInst&&K.ttftInst.length&&K.ttftInst.some(function(v){return v!=null;})){
+    draw($('c-ttft'),[{data:K.ttftInst}],{min:0,colors:[ORANGE]});
+    ttRows=[legendRow('ttft (inst)',ORANGE,K.ttftInst,fmtSec)];
+  }else{
+    var cvT=$('c-ttft');cvT.width=cvT.height=0;
+  }
+  setLegend('lg-ttft',ttRows);
+  /* hopper */
+  if(K.run&&K.run.length){
+    var hmx=Math.max(1,maxOf(K.run)||0,maxOf(K.wait)||0);
+    draw($('c-hop'),[{data:K.run},{data:K.wait}],{min:0,max:hmx*1.15,colors:[GREEN,GOLD],fill:false});
+    setLegend('lg-hop',[
+      legendRow('running',GREEN,K.run,function(v){return Math.round(v);}),
+      legendRow('waiting',GOLD,K.wait,function(v){return Math.round(v);})
+    ]);
+  }else{
+    $('c-hop').width=$('c-hop').height=0;
+    setInner('lg-hop','<div class="tmute" style="font-size:10px;padding:4px 2px">running/waiting are live gauges — not stored in history (1h/24h/7d)</div>');
+  }
+  /* row 3 — host + spec + output tps */
+  var h=d.host||{};
+  if(hist||!h.mem){
+    setArc('g-mema',null,'warn-high');setArc('g-memb',null,'warn-high');
+    setArc('g-cpu',null,'cool');
+    setArc('g-dska',null,'warn-high');setArc('g-dskb',null,'flat');
+  }else{
+    var mpc=h.mem?100*h.mem.used_gib/Math.max(h.mem.total_gib,.01):null;
+    var vram=h.gpu_mem_mib!=null&&h.mem?100*(h.gpu_mem_mib/1024)/Math.max(h.mem.total_gib,.01):null;
+    setArc('g-mema',mpc,'warn-high',mpc==null?'–':Math.round(mpc)+'%','host ram');
+    setArc('g-memb',vram,'warn-high',vram==null?'–':Math.round(vram)+'%','model vram');
+    setArc('g-cpu',h.cpu_pct,'cool',h.cpu_pct==null?'–':Math.round(h.cpu_pct)+'%','1 − idle');
+    var dsk=h.disk||{};
+    setArc('g-dska',dsk.pct,'warn-high',dsk.pct==null?'–':Number(dsk.pct).toFixed(1)+'%','used %');
+    setArc('g-dskb',dsk.inode_pct,'flat',dsk.inode_pct==null?'–':Number(dsk.inode_pct).toFixed(1)+'%','inode %');
+  }
+  /* spec decode — adaptive: vLLM /metrics histogram OR llama.cpp journal
+     (tech-agnostic: MTP/DSpark/DFlash/EAGLE/n-gram all log the same line) */
+  var SP=hist?(d.spec||null):(eng.spec||null);
+  var sa=SP?SP.acceptance:(hist?mean(K.sa):s.spec_acceptance);
+  var saSub;
+  if(sa==null){saSub=SP?'spec idle · no tasks in window':'no spec decode';}
+  else if(SP&&SP.source==='journal'){
+    saSub=SP.tech+(SP.mean_len!=null?' · '+Number(SP.mean_len).toFixed(2)+' tok/step':'');
+  }else{saSub='accepted / drafted';}
+  setArc('g-spec',sa,'ok',sa==null?'–':Number(sa).toFixed(1)+'%',saSub);
+  /* output tps chart */
+  if(K.out.length){
+    draw($('c-otps'),[{data:K.out}],{min:0,colors:[GREEN]});
+    setLegend('lg-otps',[legendRow('output tokens/sec',GREEN,K.out,fmtTps1)]);
+  }else{
+    $('c-otps').width=$('c-otps').height=0;
+    setLegend('lg-otps',null);
+  }
+  /* row 4 — total tps / mix / spec by position */
+  if(K.total.length){
+    draw($('c-tt'),[{data:K.total}],{min:0,colors:[GREEN]});
+    setLegend('lg-tt',[legendRow('total t/s',GREEN,K.total,fmtTpsInt)]);
+  }else{
+    $('c-tt').width=$('c-tt').height=0;setLegend('lg-tt',null);
+  }
+  if(K.inn.length||K.out.length){
+    draw($('c-mix'),[{data:K.inn},{data:K.out}],{min:0,colors:[GREEN,ORANGE],fill:false});
+    setLegend('lg-mix',[
+      legendRow('prompt tokens/sec',GREEN,K.inn,fmtTpsInt),
+      legendRow('output tokens/sec',ORANGE,K.out,fmtTps1)
+    ]);
+  }else{
+    $('c-mix').width=$('c-mix').height=0;setLegend('lg-mix',null);
+  }
+  /* spec decode detail card — adaptive to the data source */
+  var sp=(s.spec_pos||[]);
+  var SPd=hist?(d.spec||null):(eng.spec||null);
+  var spRows=function(kv){
+    return '<div class="sprow"><span class="spl">'+kv[0]+'</span>'
+      +'<span class="spt'+(kv[1]==null?' bare':'')+'"><span class="spb" style="width:'+(kv[1]!=null?Math.max(1,Math.min(100,kv[1])):0)+'%"></span></span>'
+      +'<span class="spv">'+(kv[2]!=null?kv[2]:'–')+'</span></div>';
+  };
+  if(SPd&&SPd.source==='journal'){
+    /* llama.cpp: per-task journal data — covers every spec tech */
+    setText('sp-title',hist?'SPEC DECODE · '+SPd.tech.toUpperCase():'SPEC DECODE · '+SPd.tech.toUpperCase()+' — LAST TASKS');
+    var bar=[
+      ['acceptance',SPd.acceptance!=null?SPd.acceptance:null,(SPd.acceptance!=null?SPd.acceptance.toFixed(1)+'%':'idle')]
+    ];
+    var dh='';
+    for(var i=0;i<bar.length;i++)dh+=spRows(bar[i]);
+    var cells=[
+      ['tasks',String(SPd.n_tasks)],
+      ['accepted',String(SPd.accepted)],
+      ['generated',String(SPd.generated)],
+      ['mean len',SPd.mean_len!=null?Number(SPd.mean_len).toFixed(2)+' tok':'–'],
+      ['n-max (cfg)',String(SPd.n_max||'–')]
+    ];
+    dh+='<div class="spgrid">';
+    for(var c=0;c<cells.length;c++)
+      dh+='<div class="sptile"><span class="k">'+cells[c][0]+'</span><span class="v">'+esc(cells[c][1])+'</span></div>';
+    dh+='</div>';
+    dh+='<div class="spempty" style="padding-top:8px">from journal · '+esc(SPd.unit||('pid lookup'))
+      +' · spec-type '+esc(SPd.spec_type||'')+'</div>';
+    setInner('sp-wrap',dh);
+  }else if(hist){
+    setText('sp-title','SPEC DECODE ACCEPTANCE');
+    setInner('sp-wrap','<div class="spempty">'+(SPd?'per-position acceptance is not stored in history':'no speculative decoding in window')+'</div>');
+  }else if(!sp.length){
+    setText('sp-title','SPEC DECODE ACCEPTANCE BY POSITION');
+    setInner('sp-wrap','<div class="spempty">'+(SPd&&SPd.source==='metrics'
+      ?'this backend exports no per-position counters (gauges only) — acceptance over the last decode batch: '+((SPd&&SPd.acceptance!=null)?SPd.acceptance.toFixed(1)+'%':'–')+' · mean accepted length '+(SPd&&SPd.mean_len!=null?SPd.mean_len.toFixed(2):'–')+' tok'
+      :(SPd?'spec enabled · no traffic in window (per-position appears after requests complete)':'no speculative decoding active in window'))+'</div>');
+  }else{
+    setText('sp-title','SPEC DECODE ACCEPTANCE BY POSITION');
+    var sh='';
+    for(var i=0;i<sp.length;i++){
+      sh+='<div class="sprow"><span class="spl">pos '+sp[i].pos+'</span>'
+        +'<span class="spt"><span class="spb" id="spb-'+p+'-'+i+'" style="width:0%"></span></span>'
+        +'<span class="spv" id="spv-'+p+'-'+i+'">'+Number(sp[i].pct).toFixed(1)+'%</span></div>';
+    }
+    if(renderedIn['sp-wrap-shape']!==sh){
+      renderedIn['sp-wrap-shape']=sh;
+      $('sp-wrap').innerHTML=sh;
+    }
+    for(var j=0;j<sp.length;j++)
+      $('spb-'+p+'-'+j).style.width=Math.max(1,Math.min(100,sp[j].pct))+'%';
+  }
+}
+
+var HW_REASON_LABELS={
+  'HW Slowdown':'hw slowdown','HW Thermal Slowdown':'hw thermal','HW Power Brake Slowdown':'hw power brake',
+  'SW Thermal Slowdown':'sw thermal','SW Power Cap':'sw power cap','SW Power Floor Slowdown':'sw power floor',
+  'SW Thermal Slowdown 2':'sw thermal 2'
+};
+var HW_COUNTER_LABELS={
+  'SW Power Cap Seconds':'sw power cap','SW Thermal Slowdown Seconds':'sw thermal',
+  'HW Thermal Slowdown Seconds':'hw thermal','HW Power Brake Slowdown Seconds':'hw power brake'
+};
+
+/* ── top GB10 over-time charts: window data + synchronized hover popup ── */
+var HWCH=[
+  {id:'c-clock',   col:GREEN,  cv:null, data:[], fmt:function(v){return v==null?'–':Math.round(v)+' MHz';}},
+  {id:'c-temp',    col:ORANGE, cv:null, data:[], fmt:function(v){return v==null?'–':Math.round(v)+'°C';}},
+  {id:'c-power',   col:GOLD,   cv:null, data:[], fmt:function(v){return v==null?'–':Math.round(v)+' W';}},
+  {id:'c-throttle',col:RED,    cv:null, data:[], fmt:function(v){return v==null?'–':(v?'yes':'no');}}
+];
+var HWCH_TS=[], HWCH_N=0, HWCH_OPTS=null, HWCH_HOVER=null;
+function _hwValId(id){return id==='c-clock'?'gc-v':id==='c-temp'?'gt-v':id==='c-power'?'gp-v':'gh-v';}
+function renderGpuCharts(gpu){
+  if(!HWCH_OPTS)HWCH_OPTS=[{min:0},{min:0,max:100},{min:0,max:130},{min:0,max:1,fill:false}];
+  var data=[gpu.sm_clock_mhz||[],gpu.temp_c||[],gpu.power_w||[],gpu.throttle_active||[]];
+  var n=Math.max(0,data[0].length,data[1].length,data[2].length,data[3].length);
+  HWCH_TS=gpu.ts||[]; HWCH_N=n;
+  for(var i=0;i<4;i++){
+    var c=HWCH[i]; c.cv=$(c.id); c.data=data[i];
+    if(c.data.length){
+      draw(c.cv,[{data:c.data}],{min:HWCH_OPTS[i].min,max:HWCH_OPTS[i].max,colors:[c.col],fill:HWCH_OPTS[i].fill});
+      setText(_hwValId(c.id),c.fmt(last(c.data)));
+    }else{
+      if(c.cv){c.cv.width=c.cv.height=0;}
+      setText(_hwValId(c.id),'–');
+    }
+  }
+  /* keep the crosshair alive across the 5s auto-refresh if still hovering */
+  if(HWCH_HOVER!=null)_redrawHw(HWCH_HOVER);
+}
+function _hwTimeStr(i){
+  var t=HWCH_TS[i];if(t==null)return '';
+  var d=new Date(t*1000);
+  function p(x){return (x<10?'0':'')+x;}
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function showHwTip(clientX,clientY,frac){
+  var n=HWCH_N;
+  if(!n){$('hwtip').style.display='none';return;}
+  var idx=Math.max(0,Math.min(n-1,Math.round(frac*(n-1))));
+  var t=_hwTimeStr(idx);
+  var h='<div class="tht">'+(t?('at '+t):('sample '+idx))+'</div>';
+  var names=['sm clock','gpu temp','power','throttle'];
+  for(var i=0;i<4;i++){
+    var c=HWCH[i];
+    var v=(idx<c.data.length)?c.data[idx]:null;
+    h+='<div class="thr"><i style="background:'+c.col+'"></i><span class="k">'+names[i]+'</span><span class="v">'+c.fmt(v)+'</span></div>';
+  }
+  var tip=$('hwtip');tip.innerHTML=h;tip.style.display='block';
+  var w=tip.offsetWidth, x=clientX+16, y=clientY+16;
+  if(x+w>window.innerWidth-8)x=clientX-w-16;
+  if(y+tip.offsetHeight>window.innerHeight-8)y=clientY-tip.offsetHeight-16;
+  tip.style.left=x+'px';tip.style.top=y+'px';
+}
+function _redrawHw(crosshair){
+  for(var j=0;j<HWCH.length;j++){
+    var c=HWCH[j];
+    if(!c.cv||!c.data.length)continue;
+    var opt={fill:HWCH_OPTS[j].fill,min:HWCH_OPTS[j].min,max:HWCH_OPTS[j].max,colors:[c.col]};
+    if(crosshair!=null)opt.crosshair=crosshair;
+    draw(c.cv,[{data:c.data}],opt);
+  }
+}
+function initHwHover(){
+  for(var i=0;i<HWCH.length;i++){
+    (function(i){
+      var cv=$(HWCH[i].id);
+      cv.addEventListener('mousemove',function(e){
+        if(!HWCH_N||!cv.width)return;
+        var r=cv.getBoundingClientRect();
+        var frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+        HWCH_HOVER=frac*cv.width;
+        _redrawHw(HWCH_HOVER);
+        showHwTip(e.clientX,e.clientY,frac);
+      });
+      cv.addEventListener('mouseleave',function(){
+        HWCH_HOVER=null;
+        _redrawHw(null);
+        $('hwtip').style.display='none';
+      });
+    })(i);
+  }
+}
+
+/* GB10 gauges + detail — ALWAYS live, regardless of the selected timeframe.
+   Charts are handled separately by renderGpuCharts (window data). */
+function renderGpu(hw,gpu,hist){
+  /* over-time charts follow the selected window (live ring or sqlite) */
+  renderGpuCharts(gpu||{ts:[]});
+  if(!hw)return;
+  /* GB10 nvidia-smi tlimit is a delta, not a ceiling — fixed 90°C scale,
+     risk threshold 60°C (matches the Grafana repo's panel). */
+  setArc('gc-g-smc',hw.sm_clock_mhz==null?null:(hw.sm_clock_max_mhz?hw.sm_clock_mhz/hw.sm_clock_max_mhz*100:0),'flat',
+    (hw.sm_clock_mhz==null?'–':Math.round(hw.sm_clock_mhz))+' MHz',
+    hw.sm_clock_max_mhz?'of '+hw.sm_clock_max_mhz+' MHz':'');
+  setArc('gc-g-gpt',hw.temp_c,'warn-high',(hw.temp_c==null?'–':Math.round(hw.temp_c))+'°C','risk 60°C+');
+  setArc('gc-g-gpw',hw.power_w==null?null:hw.power_w/130*100,'flat',
+    (hw.power_w==null?'–':Math.round(hw.power_w))+' W','130 W cap');
+  setArc('gc-g-gut',hw.util_pct,'ok',(hw.util_pct==null?'–':Math.round(hw.util_pct))+'%','util');
+  $('hw-clock').innerHTML=(hw.sm_clock_mhz==null?'–':hw.sm_clock_mhz+' MHz')
+    +(hw.sm_clock_max_mhz?' <small>max '+hw.sm_clock_max_mhz+'</small>':'');
+  /* nvme — 70°C scale (matches GPU temp's 60°C risk line + margin) */
+  setArc('gc-g-nvm',hw.nvme_c==null?null:hw.nvme_c/70*100,'warn-high',
+    (hw.nvme_c==null?'–':Math.round(hw.nvme_c))+'°C','warn 50\nhot 65');
+  /* net rx+tx — % of link speed. Wired: negotiated speed, fixed for the
+     link's life. Wi-Fi: live 802.11 PHY air rate (iw tx bitrate) — moves
+     with signal, and 802.11 overhead means goodput tops out ~50-70% of it,
+     so a saturated link reads ~70%, not 100%. bps*8 = bits/s; link is Mb/s. */
+  var link=hw.net_link_mbps,kind=hw.net_link_kind,bps=hw.net_bps;
+  if(link){
+    setArc('gc-g-net',Math.min(100,bps*8/(link*1e6)*100),'warn-high',
+      fmtBps(bps),'of '+fmtLink(link)+(kind==='wifi'?'\nair rate':''));
+  }else{
+    setArc('gc-g-net',null,'flat',fmtBps(bps),'wifi\nno fixed link');
+  }
+  /* swap — used/total */
+  var sw=hw.swap;
+  if(sw&&sw.total_gib>0){
+    setArc('gc-g-swp',sw.used_gib/sw.total_gib*100,'warn-high',
+      sw.used_gib+' GiB','of '+sw.total_gib+' GiB');
+  }else{
+    setArc('gc-g-swp',null,'flat','none','no swap');
+  }
+  /* throttle — current state: cause + time in this state (live, not history) */
+  var active=[],pills='';
+  /* HW Slowdown is the PARENT of HW Thermal / HW Power Brake — when a child
+     is active the parent is the same event wearing two labels, so the cause
+     list (gauge) shows only the child. Bare parent with no child is kept as
+     a guard (shouldn't happen). The pills below stay the raw 5-state board. */
+  var hwChild=hw.throttle_reasons
+    ?!!(hw.throttle_reasons['HW Thermal Slowdown']||hw.throttle_reasons['HW Power Brake Slowdown'])
+    :false;
+  Object.keys(hw.throttle_reasons||{}).forEach(function(k){
+    var on=!!hw.throttle_reasons[k];
+    if(on && k==='HW Slowdown' && hwChild)return;
+    if(on)active.push(HW_REASON_LABELS[k]||k);
+    pills+='<span class="tpill'+(on?' active':'')+'">'+(HW_REASON_LABELS[k]||k)+'</span>';
+  });
+  var thrSub='all clear';
+  if(active.length){
+    var since=hw.throttle_since_ts!=null?hw.throttle_since_ts:(hw.now||Date.now()/1000);
+    thrSub=active.join(', ')+' · '+fmtDurS((hw.now||Date.now()/1000)-since);
+  }
+  setArc('gc-g-thr',active.length?100:0,active.length?'bad':'ok',
+    active.length?'yes':'none',thrSub);
+  setInner('hw-pills',pills||'<span class="tpill">n/a</span>');
+  var cts='';
+  Object.keys(hw.throttle_counters_us||{}).forEach(function(k){
+    var us=hw.throttle_counters_us[k];
+    var lbl=HW_COUNTER_LABELS[k]||k.replace(/ Seconds$/,'').toLowerCase();
+    cts+='<div class="throttle"><span class="k">throttled by '+esc(lbl)+'</span>'
+      +'<span class="v'+(us>0?' hot':'')+'">'+fmtUs(us)+'</span></div>';
+  });
+  setInner('hw-counters',cts||'<div class="throttle"><span class="k">counters</span><span class="v">n/a</span></div>');
+}
+
+function fetchData(){
+  busy=true;
+  /* no live=1: that server-side filter drops up-but-metrics-less engines,
+     which the picker must show (degraded, not invisible). The page filters
+     on `up` itself. */
+  var url=WIN>=3600?('/api/metrics/history?span='+WIN):('/api/metrics?window='+WIN);
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    if(d.error){setLive(false,d.error);busy=false;return;}
+    setLive(true);
+    buildShells();
+    setCurrency((d.cost&&d.cost.currency)||(d.alltime&&d.alltime.currency)||
+                (d.cost_today&&d.cost_today.currency)||'USD');
+    var hist=WIN>=3600;
+    $('src-note').textContent=hist?'history · sqlite ('+d.points+' pts)':'live · in-memory';
+    renderCost(d.cost||null);
+    renderMeters(d);
+    var list=[];
+    if(d.engines){
+      /* filter on UP, not has_metrics: an engine serving without --metrics
+         is still running and must be selectable (degraded panels, not gone). */
+      list=d.engines.filter(function(e){return e.up;});
+      if(selPort==null||list.every(function(e){return e.port!==selPort;}))selPort=list.length?list[0].port:null;
+      var sel=list.length?list.find(function(e){return e.port===selPort;}):null;
+      renderStrip(list.length?list:d.engines,sel);
+      var eng=sel;
+      if(eng){
+        document.body.classList.remove('no-engage');
+        renderPanels(eng,hist,d);
+      }else{
+        document.body.classList.add('no-engage');
+      }
+      renderGpu(d.gpu_hw,d.gpu_series,false);
+    }else{
+      /* history shape */
+      var eng=null;
+      if(d.port!=null){
+        eng={port:d.port,label:d.model||'engine',kind:'unit',model:d.model,
+             up:d.points>0,has_metrics:true,stats:{},series:d.series||{}};
+      }
+      renderStrip(eng?[eng]:[],eng);
+      if(eng){
+        document.body.classList.remove('no-engage');
+        renderPanels(eng,hist,d);
+      }else{
+        document.body.classList.add('no-engage');
+      }
+      /* gauges stay live (d.gpu_hw); charts follow the window (sqlite d.gpu) */
+      renderGpu(d.gpu_hw||null,d.gpu||{ts:[]},true);
+    }
+    busy=false;
+  }).catch(function(e){setLive(false,String(e));busy=false;});
+}
+
+/* ── info-icon tooltips (styled; native title= is unreliable on dark UI) ── */
+function initInfoTips(){
+  var tip=document.createElement('div');
+  tip.id='infotip';
+  document.body.appendChild(tip);
+  function show(el){
+    var t=el.getAttribute('data-tip');
+    if(!t)return;
+    tip.textContent=t;
+    tip.classList.add('on');
+    var r=el.getBoundingClientRect();
+    var tw=tip.offsetWidth,th=tip.offsetHeight;
+    var x=r.left+r.width/2-tw/2;
+    x=Math.max(8,Math.min(x,window.innerWidth-tw-8));
+    var y=r.bottom+8;
+    if(y+th>window.innerHeight-8)y=r.top-th-8;
+    tip.style.left=x+'px';
+    tip.style.top=Math.max(8,y)+'px';
+  }
+  function hide(){tip.classList.remove('on');}
+  document.addEventListener('mouseover',function(e){
+    var el=e.target.closest?e.target.closest('.info'):null;
+    if(el)show(el);else hide();
+  });
+  document.addEventListener('mouseout',function(e){
+    var el=e.target.closest?e.target.closest('.info'):null;
+    if(el)hide();
+  });
+  /* keyboard: focusable for screen readers */
+  var infos=document.querySelectorAll('.info');
+  for(var i=0;i<infos.length;i++){
+    (function(el){
+      el.setAttribute('tabindex','0');
+      el.setAttribute('role','note');
+      el.addEventListener('focus',function(){show(el);});
+      el.addEventListener('blur',hide);
+    })(infos[i]);
+  }
+}
+
+initHwHover();
+initInfoTips();
+fetchData();
+setInterval(function(){if(!busy)fetchData();},5000);
+
+/* ── per-model delete (TOKENS BY MODEL ✕) ────────────────── */
+function modelDelModal(model){
+  if(document.getElementById('mdel-overlay'))return;
+  var ov=document.createElement('div');
+  ov.id='mdel-overlay';
+  ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;z-index:60;padding:20px';
+  ov.innerHTML='<div style="background:var(--bg);border:1px solid var(--card-edge);border-radius:10px;'
+    +'width:min(460px,100%);box-shadow:0 24px 80px rgba(0,0,0,.6);padding:18px 22px;position:relative;overflow:hidden">'
+    +'<div style="position:absolute;left:0;right:0;top:0;height:2px;background:linear-gradient(90deg,var(--bad),transparent)"></div>'
+    +'<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:2px;color:var(--bad);margin-bottom:10px">remove model card</h3>'
+    +'<div style="font-size:12.5px;color:var(--dim);line-height:1.6">'
+    +'Remove <b style="color:var(--txt)">'+esc(model)+'</b> from TOKENS BY MODEL?'
+    +' Its lifetime token count is deleted. A metrics.db snapshot is saved first.'
+    +'</div>'
+    +'<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px">'
+    +'<button id="mdel-no" class="btn">cancel</button>'
+    +'<button id="mdel-yes" class="btn" style="border-color:color-mix(in srgb,var(--bad) 45%,transparent);color:var(--bad)">remove</button>'
+    +'</div></div>';
+  document.body.appendChild(ov);
+  function close(){ov.remove();}
+  ov.addEventListener('click',function(e){if(e.target===ov)close();});
+  ov.querySelector('#mdel-no').addEventListener('click',close);
+  ov.querySelector('#mdel-yes').addEventListener('click',function(){
+    close();
+    fetch('/api/data/reset',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'model',model:model})})
+      .then(function(r){return r.json();})
+      .then(function(r){
+        var t=document.createElement('div');
+        t.style.cssText='position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--bg);'
+          +'border:1px solid '+(r.error?'color-mix(in srgb,var(--bad) 50%,transparent)':'var(--card-edge)')
+          +';border-radius:12px;padding:11px 20px;font-size:12.5px;z-index:70';
+        t.textContent=r.error||('removed · backup: '+String(r.backup||'').split('/').pop());
+        if(r.error)t.style.color='var(--bad)';
+        document.body.appendChild(t);
+        setTimeout(function(){t.remove();},4200);
+        fetchData();
+      });
+  });
+}
+</script>
+<div id="hwtip"></div>
+</body>
+</html>

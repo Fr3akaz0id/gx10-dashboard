@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+config.json
+metrics.db
+metrics.db-*
+logs/
