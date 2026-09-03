@@ -316,13 +316,13 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
 
 <!-- row 1 — token volume & rate -->
 <div class="row r15" id="row1">
-  <div class="stat s15-3"><div class="st-t">TOTAL TOKENS (RANGE) <span class="info" data-tip="increase(prompt + predicted tokens) over the window">i</span></div>
+  <div class="stat s15-3"><div class="st-t">TOTAL TOKENS (RANGE) <span class="info" data-tip="History view: sum of prompt+predicted tokens over the selected window. Live view: the increase over the live scrape buffer (~15 min), which is NOT the full selected window.">i</span></div>
     <div class="st-v" id="st-tok-total">–</div><canvas class="spark" id="spark-tok-total"></canvas>
     <div class="st-s">total tokens</div></div>
-  <div class="stat s15-3"><div class="st-t">OUTPUT TOKENS (RANGE) <span class="info" data-tip="increase(predicted tokens) over the window">i</span></div>
+  <div class="stat s15-3"><div class="st-t">OUTPUT TOKENS (RANGE) <span class="info" data-tip="History view: sum of predicted tokens over the selected window. Live view: increase over the live scrape buffer (~15 min), not the full window.">i</span></div>
     <div class="st-v" id="st-tok-out">–</div><canvas class="spark" id="spark-tok-out"></canvas>
     <div class="st-s">output tokens</div></div>
-  <div class="stat s15-3"><div class="st-t">INPUT TOKENS (RANGE) <span class="info" data-tip="increase(prompt tokens) over the window">i</span></div>
+  <div class="stat s15-3"><div class="st-t">INPUT TOKENS (RANGE) <span class="info" data-tip="History view: sum of prompt tokens over the selected window. Live view: increase over the live scrape buffer (~15 min), not the full window.">i</span></div>
     <div class="st-v" id="st-tok-in">–</div><canvas class="spark" id="spark-tok-in"></canvas>
     <div class="st-s">input tokens</div></div>
   <div class="stat s15-3"><div class="st-t">TOTAL TOKENS / SEC <span class="info" data-tip="rate(prompt + predicted tokens) — prompt+output combined">i</span></div>

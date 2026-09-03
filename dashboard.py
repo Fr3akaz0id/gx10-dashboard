@@ -554,6 +554,31 @@ def _with_sglang_aliases(parsed):
     return parsed
 
 
+def _with_ds4_aliases(parsed):
+    """Map DS4 engine /metrics (ds4:*) onto the vLLM-shaped names the generic
+    pipeline reads so token/spec counters and inflight/queue gauges render for
+    ds4 engines. Original ds4:* entries stay in place. Verified against the
+    live surface (:8000, deepseek-v4-flash, 2026-09-02)."""
+    ctr, g = parsed.get("counters", {}), parsed.get("gauges", {})
+    for src, dst in (("ds4_tokens_prefilled_total", "vllm:prompt_tokens_total"),
+                     ("ds4_tokens_decoded_total", "vllm:generation_tokens_total"),
+                     ("ds4_spec_hits_total", "vllm:spec_decode_num_accepted_tokens_total"),
+                     ("ds4_spec_drafts_total", "vllm:spec_decode_num_draft_tokens_total")):
+        if src in ctr and dst not in ctr:
+            total = _sum_counter_table(parsed, src)
+            ctr[dst] = {"value": total, "labels": {},
+                        "series": [{"value": total, "labels": {}}]}
+    for src, dst in (("ds4_requests_inflight", "vllm:num_requests_running"),
+                     ("ds4_queue_depth", "vllm:num_requests_waiting")):
+        if src in g and dst not in g:
+            g[dst] = dict(g[src])
+    return parsed
+
+
+def _is_ds4_sample(sample):
+    return "ds4_tokens_decoded_total" in (sample or {}).get("counters", {})
+
+
 def _is_sglang_sample(sample):
     return any(n in (sample or {}).get("counters", {})
                for n in ("sglang:prompt_tokens_total", "sglang:generation_tokens_total")) \
@@ -604,6 +629,7 @@ def scrape_engines():
                 parsed = promparse.parse(raw.decode("utf-8", "replace"))
                 parsed = _with_llamacpp_aliases(parsed)
                 parsed = _with_sglang_aliases(parsed)
+                parsed = _with_ds4_aliases(parsed)
                 st["samples"].append((time.time(), parsed))
                 st["up"] = True
                 st["has_metrics"] = True
@@ -988,6 +1014,46 @@ def _window_stats(st, window_s):
     h_qry = _delta(_c(first, "vllm:prefix_cache_queries_total"), _c(cur, "vllm:prefix_cache_queries_total"))
     if h_hits is not None and h_qry is not None and (h_hits + h_qry) > 0:
         res["prefix_hit_rate"] = round(100.0 * h_hits / (h_hits + h_qry), 1)
+    # DS4: prefix-cache hit rate from the computed/cached prefill split
+    # (ds4_tokens_prefilled_total{kind="cached"} vs kind="computed").
+    if res.get("prefix_hit_rate") is None:
+        c_f = _c_lab(first, "ds4_tokens_prefilled_total", {"kind": "cached"})
+        c_c = _c_lab(cur, "ds4_tokens_prefilled_total", {"kind": "cached"})
+        m_f = _c_lab(first, "ds4_tokens_prefilled_total", {"kind": "computed"})
+        m_c = _c_lab(cur, "ds4_tokens_prefilled_total", {"kind": "computed"})
+        hits = _delta(c_f, c_c)
+        miss = _delta(m_f, m_c)
+        if hits is not None and miss is not None and (hits + miss) > 0:
+            res["prefix_hit_rate"] = round(100.0 * hits / (hits + miss), 1)
+    a = _delta(_c(first, "vllm:spec_decode_num_accepted_tokens_total"),
+               _c(cur, "vllm:spec_decode_num_accepted_tokens_total"))
+    dr = _delta(_c(first, "vllm:spec_decode_num_draft_tokens_total"),
+                _c(cur, "vllm:spec_decode_num_draft_tokens_total"))
+    if a is not None and dr:
+        res["spec_acceptance"] = round(100.0 * a / dr, 1)
+    # SGLang: acceptance is a live gauge (spec_accept_rate, 0-1), not a
+    # counter pair. Read straight off the original sglang: gauge.
+    if res["spec_acceptance"] is None and any(_is_sglang_sample(p) for _t, p in pts):
+        sa = _g(cur, "sglang:spec_accept_rate")
+        if sa is not None:
+            res["spec_acceptance"] = round(100.0 * sa, 1)
+        # mean accepted length per step (tok/step) — the analogue of
+        # llama.cpp's mean_len / vLLM's per-position decay
+        ml = _g(cur, "sglang:spec_accept_length")
+        if ml is not None:
+            res["spec_mean_len"] = round(ml, 2)
+    # DS4: acceptance is a live gauge (spec_accept_ratio, 0-1) — used only
+    # when no accepted/draft counter pair computed it; mean accepted length
+    # per step is tok_per_step, read whenever a ds4 sample is present.
+    if any(_is_ds4_sample(p) for _t, p in pts):
+        if res["spec_acceptance"] is None:
+            sa = _g(cur, "ds4_spec_accept_ratio")
+            if sa is not None:
+                res["spec_acceptance"] = round(100.0 * sa, 1)
+        if res.get("spec_mean_len") is None:
+            ml = _g(cur, "ds4_tok_per_step")
+            if ml is not None:
+                res["spec_mean_len"] = round(ml, 2)
     a = _delta(_c(first, "vllm:spec_decode_num_accepted_tokens_total"),
                _c(cur, "vllm:spec_decode_num_accepted_tokens_total"))
     dr = _delta(_c(first, "vllm:spec_decode_num_draft_tokens_total"),
@@ -2213,6 +2279,8 @@ def api_metrics(window_s, live_only=False):
                     e["backend"] = "llama"
                 elif _is_sglang_sample(last_p):
                     e["backend"] = "sglang"
+                elif _is_ds4_sample(last_p):
+                    e["backend"] = "ds4"
                 else:
                     e["backend"] = "vllm"
             proc = _engine_proc(port)
