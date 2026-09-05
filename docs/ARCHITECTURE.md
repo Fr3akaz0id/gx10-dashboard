@@ -37,7 +37,7 @@ points while preserving token sums exactly).
 | `samples` | per-port token/stat rows per flush | 14 d (pruned daily) |
 | `gpu_hw` | host GPU series per flush | 14 d |
 | `ledger` | cumulative `(in, out, energy_kwh)` per port + fleet row (`port=-1`) | **never pruned** |
-| `model_ledger` | cumulative `(in, out)` per model | never pruned |
+| `model_ledger` | cumulative `(in, out)` per composite key `model\0version\0engine` (+ `*_initial_cum` for unobserved pre-observation counters) | never pruned |
 | `counter_watermarks` / `model_watermarks` | max-ever engine counter per port/model | — |
 | `meta` | backfill/prune markers, reset timestamp | — |
 
@@ -45,11 +45,16 @@ points while preserving token sums exactly).
 
 Engine `/metrics` counters are lifetime-since-engine-start. To accumulate an
 all-time total without double-counting restarts, the flush stores `max-ever`
-of each lifetime counter per port (and per model). Each flush credits only
+of each lifetime counter per port (and per model key). Each flush credits only
 `current − watermark` when positive; when an engine restarts (counter <
 watermark) the watermark resets to the new smaller reading. Ledger row =
-running sum of credits. Data-reset tiers rewrite watermarks/ledger and rebase
-to the live reading, so "start counting from today" is exact, not approximate.
+running sum of credits. The model key is composite `(model, version, engine)`
+so a key flip (model swap on a lane) credits only growth since the last
+watermark, never the whole lifetime counter; unattributable counters
+(observed for the first time after a restart) land in `*_initial_cum` and are
+excluded from the observed totals. Data-reset tiers rewrite watermarks/ledger
+and rebase to the live reading, so "start counting from today" is exact, not
+approximate.
 
 SGLang quirk: its counters arrive under `sglang:*` names; `promparse` aliases
 them to the `vllm:*` keys the ledger expects — an alias must carry a `series`

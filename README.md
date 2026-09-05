@@ -8,8 +8,9 @@ plus a JSON API on port 9000.
 It answers one question in one glance: **what is my box doing, and what is it
 costing me?** GPU thermals and throttle state, per-engine token throughput,
 KV-cache occupancy, spec-decode acceptance, prefix-cache
-hits, and three cost views — today's cloud-price equivalent per token SKU,
-today's electricity, and an all-time meter that survives restarts.
+hits, **slot (concurrency) utilization**, and three cost views — today's
+cloud-price equivalent per token SKU, today's electricity, and an all-time
+meter that survives restarts and reboots.
 
 ```
   ┌──────────────┐     scrape      ┌─────────────────────────────┐
@@ -63,7 +64,7 @@ and [docs/CONFIG.md](docs/CONFIG.md).
 
 | Path | What it shows |
 |------|---------------|
-| `/` | Metrics landing page: GB10 gauges (SM/temp/power/util/throttle), per-engine stat cards with live tok/s, spec-decode card, today + all-time cost meters, TOKENS BY MODEL grid |
+| `/` | Metrics landing page: GB10 gauges (SM/temp/power/util/throttle), **SLOTS card** (live per-slot seats + occupancy over the window, for the selected lane), per-engine stat cards with live tok/s, spec-decode card, REQUEST HOPPER (running/waiting, live + history), today + all-time cost meters, TOKENS BY MODEL grid |
 | `/engines` | Fleet view: systemd units + docker containers, discovery, per-unit flag editor (surgical, byte-stable unit-file writes with diff preview) |
 | `/settings` | Engine fleet editor, model roots, cost config (energy tariff + token SKUs, USD/EUR display), data reset tiers |
 | `/setup` | Onboarding wizard: scans for model dirs and inference engines, writes config.json. Forced when config.json is missing; revisit anytime (current settings pre-selected) |
@@ -76,9 +77,21 @@ and [docs/CONFIG.md](docs/CONFIG.md).
   serve all live views, so a DB hiccup never degrades the page.
 - **SQLite WAL** writer flushes every 30 s: `samples` + `gpu_hw` with 14-day
   retention, and a **never-pruned cumulative ledger** (`ledger`,
-  `model_ledger`) driven by max-ever watermarks per port/model — the
-  all-time meter. A negative counter delta (engine restart) rebases instead
-  of double-counting.
+  `model_ledger`) driven by max-ever watermarks per port. `model_ledger` is
+  keyed on the composite `(model, version, engine)` so two lanes serving the
+  same model base — or two quants of it — stay separate rows, and a key swap
+  credits only the growth since the last watermark (never the whole lifetime
+  counter). A negative counter delta (engine restart) rebases instead of
+  double-counting.
+- **Slot (concurrency) utilization.** Each lane's max in-flight request
+  capacity is read live from the process (`--max-running-requests` for SGLang,
+  `--max-num-seqs` for vLLM, `--parallel` for llama.cpp preferring the live
+  `/slots` count, `--max-concurrent` for ds4). The `/metrics` SLOTS card shows
+  live per-slot seats + queue for the selected lane, plus occupancy over the
+  window with avg-concurrency / %-at-cap / queued KPIs. Per-slot tok/s is a
+  real measurement on llama.cpp (`/slots` deltas); backends that expose no
+  per-request rates (SGLang/vLLM/ds4) show an estimate (aggregate ÷ running),
+  marked ≈.
 - **Config hot-reload by mtime**: changes made in `/settings` take effect on
   the next poll, no restart. Every save writes a timestamped `.bak` first and
   always goes through a diff preview.
@@ -125,7 +138,8 @@ journalctl -u gx10-dashboard -f               # logs
 tail /opt/gx10-dashboard/logs/dbwriter.err    # DB writer errors
 curl -s localhost:9000/api/metrics | python3 -m json.tool | head   # smoke test
 python3 tests/test_promparse.py && python3 tests/test_metadb_decimate.py \
-  && python3 tests/test_ledger.py && python3 tests/test_sglang.py   # test suite
+  && python3 tests/test_ledger.py && python3 tests/test_sglang.py \
+  && python3 tests/test_model_ledger.py      # test suite
 ```
 
 ## Security posture

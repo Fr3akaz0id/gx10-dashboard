@@ -23,6 +23,18 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_PATH = os.path.join(BASE_DIR, "dashboard.log")
+
+
+def dlog(msg):
+    """Append a timestamped line to dashboard.log (in the dashboard dir)."""
+    try:
+        with open(LOG_PATH, "a") as f:
+            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
 sys.path.insert(0, BASE_DIR)
 import engines
 import engines_write
@@ -653,21 +665,29 @@ def scrape_engines():
                     st["up"] = True
                 except Exception:
                     st["up"] = False
-            # model identity for the ledger: live metric label wins, then the
-            # process cmdline (--model/-m), then config. Computed every scrape
-            # so a model swap on the same port is noticed within one poll.
-            st["model_key"] = _short_model(st.get("model_live") or st.get("model_cmdline")
-                                           or st.get("model") or f"port {port}")
+            # model identity for the ledger: (model base, version, engine) —
+            # composite key, see _model_identity. Computed every scrape so a
+            # model/quant/engine swap on the port is attributed within one
+            # poll. `model_key` = the composite key (used by the reset API
+            # and data-management rebases).
             if not st.get("model_live"):
+                # llama.cpp emits no model_name label — its only source is
+                # the process --model/-m/--model-path filename
                 proc = _engine_proc(port)
                 if proc:
                     m = _arg(proc["args"], "--model") or _arg(proc["args"], "-m") \
                         or _arg(proc["args"], "--model-path")
                     st["model_cmdline"] = os.path.basename(m) if m else None
-                    st["model_key"] = _short_model(st.get("model_live") or st.get("model_cmdline")
-                                                   or st.get("model") or f"port {port}")
+            ident = _model_identity(port, st)
+            st["model_identity"] = ident
+            st["model_key"] = ident["key"]
+            st["backend"] = ident["engine"].split(":")[0]
             if st.get("has_metrics") and parsed and "llamacpp:prompt_tokens_total" in parsed.get("counters", {}):
                 _update_slots(st)  # llama.cpp: kv occupancy + prefix reuse live in /slots
+            # slot capacity (concurrent request slots) for the utilization
+            # view. llama's _update_slots just populated st["n_slots"] above,
+            # so it must run after that; backend reused from _model_identity.
+            st["slot_cap"] = _slot_capacity(port, st, ident["engine"].split(":")[0])
         known = set(ports)
         for p in [p for p in eng_metrics["engines"] if p not in known]:
             del eng_metrics["engines"][p]
@@ -702,6 +722,7 @@ def _update_slots(st):
         return
     now = time.time()
     used = total = 0
+    n_slots = 0
     for s in slots:
         try:
             ctx = int(s.get("n_ctx") or 0)
@@ -709,12 +730,18 @@ def _update_slots(st):
             ctx = 0
         if ctx <= 0:
             continue
+        n_slots += 1
         total += ctx
         nt = s.get("next_token")
         nt = nt[0] if isinstance(nt, list) and nt else {}
         prompt = s.get("n_prompt_tokens") or 0
         if prompt > 0 or s.get("is_processing"):
             used += prompt + (nt.get("n_decoded") or 0)
+    # llama's concurrent slots = the /slots list length (n_parallel runtime
+    # truth — this is the engine's request CAPACITY, read live so it tracks
+    # --parallel restarts). _slot_capacity prefers this over the flag.
+    if n_slots:
+        st["n_slots"] = n_slots
     if total:
         pct = round(100.0 * used / total, 4)
         st["kv"] = {"ts": now, "pct": round(100.0 * used / total, 2),
@@ -791,6 +818,51 @@ def _update_slots(st):
                     pr[tid_f] = (now, cache, cache + processed)
     for sid in [sid for sid in fl if sid not in seen_slots]:
         fl.pop(sid, None)
+    # --- per-slot decode rate (live) ---
+    # /slots exposes n_decoded PER SLOT, so each seat's own tok/s is a real
+    # measurement here (SGLang/vLLM expose no per-request rates at all — the
+    # UI marks those as estimates). Track the token position per slot:
+    # same task -> credit the positive delta / elapsed; new task or counter
+    # reset -> baseline only (its first chunk is lost, bounded by one poll
+    # gap x rate — same loss class the aggregate rate above accepts).
+    tr = st.setdefault("slot_rate_pos", {})
+    tps = {}
+    for s in slots:
+        sid = s.get("id")
+        tid = s.get("id_task")
+        nt = s.get("next_token")
+        nt = nt[0] if isinstance(nt, list) and nt else {}
+        pos = (nt.get("n_decoded") or 0) + (s.get("n_prompt_tokens_processed") or 0)
+        f = tr.get(sid)
+        if f and f[0] == tid and now - f[2] >= 1 and pos >= f[1]:
+            tps[sid] = round((pos - f[1]) / (now - f[2]), 2)
+        tr[sid] = (tid, pos, now)
+    for k in [k for k in tr if now - tr[k][2] > 120]:
+        del tr[k]
+    st["slot_tps"] = tps
+
+
+def _live_slot_state(st):
+    """Live per-slot occupancy: which seats are busy right now, how many
+    queue behind them, and each busy seat's own decode rate (None when the
+    backend exposes no per-request rates — the UI renders an estimate)."""
+    if not st:
+        return {}
+    cap = st.get("slot_cap")
+    run = wait = 0
+    tps = st.get("slot_tps") or {}
+    if st.get("samples"):
+        run = int(_g(st["samples"][-1][1], "vllm:num_requests_running") or 0)
+        wait = int(_g(st["samples"][-1][1], "vllm:num_requests_waiting") or 0)
+    seats = [True] * run + [False] * max(0, (cap or 0) - run)
+    if tps:
+        rates = [round(v, 1) for v in tps.values()]
+        busy = sorted(rates, reverse=True)[:run]
+        while len(busy) < run:
+            busy.append(None)
+    else:
+        busy = [None] * run
+    return {"cap": cap, "run": run, "wait": wait, "seats": seats, "busy": busy}
 
 
 def _is_llamacpp_sample(sample):
@@ -1054,23 +1126,6 @@ def _window_stats(st, window_s):
             ml = _g(cur, "ds4_tok_per_step")
             if ml is not None:
                 res["spec_mean_len"] = round(ml, 2)
-    a = _delta(_c(first, "vllm:spec_decode_num_accepted_tokens_total"),
-               _c(cur, "vllm:spec_decode_num_accepted_tokens_total"))
-    dr = _delta(_c(first, "vllm:spec_decode_num_draft_tokens_total"),
-                _c(cur, "vllm:spec_decode_num_draft_tokens_total"))
-    if a is not None and dr:
-        res["spec_acceptance"] = round(100.0 * a / dr, 1)
-    # SGLang: acceptance is a live gauge (spec_accept_rate, 0-1), not a
-    # counter pair. Read straight off the original sglang: gauge.
-    if res["spec_acceptance"] is None and any(_is_sglang_sample(p) for _t, p in pts):
-        sa = _g(cur, "sglang:spec_accept_rate")
-        if sa is not None:
-            res["spec_acceptance"] = round(100.0 * sa, 1)
-        # mean accepted length per step (tok/step) — the analogue of
-        # llama.cpp's mean_len / vLLM's per-position decay
-        ml = _g(cur, "sglang:spec_accept_length")
-        if ml is not None:
-            res["spec_mean_len"] = round(ml, 2)
     for key, p, names in (("ttft_p50", 50, ("vllm:time_to_first_token_seconds",)),
                           ("ttft_p95", 95, ("vllm:time_to_first_token_seconds",)),
                           ("ttft_p99", 99, ("vllm:time_to_first_token_seconds",)),
@@ -1275,6 +1330,16 @@ def _engine_series(st, window_s):
         out[key] = [arr[i] for i in idx]
     for j, key in enumerate(("ttft_p50", "ttft_p95", "ttft_p99")):
         out[key] = [ttft_p[i][j] for i in idx]
+    # slot occupancy + aggregate rate per point -> the SLOTS card's
+    # over-time chart. The out[*] arrays are ALREADY strided to idx —
+    # re-indexing them with idx would stride twice and blow past the end
+    # once the ring outgrows the ~150-point stride (list index out of range).
+    out["slot_series"] = {
+        "ts": out["ts"],
+        "running": out["running"],
+        "waiting": out["waiting"],
+        "out_tps": out["output_per_s"],
+    }
     return out
 
 
@@ -1540,6 +1605,8 @@ def _to_db_row(port, st):
         "prompt_cached_pct": s["prompt_cached_pct"],
         "in_tokens": s["in_tokens"],
         "out_tokens": s["out_tokens"],
+        "slot_cap": st.get("slot_cap"),
+        "slot_running": s["running"],
     }
 
 
@@ -1617,8 +1684,12 @@ def _db_maybe_write(gpu_info_now):
                         continue
                     it, ot = _lifetime_token_counters(st)
                     metadb.ledger_update(_db_conn, port, it, ot, pw)
+                    ident = st.get("model_identity") or {}
                     metadb.model_ledger_update(_db_conn, port,
-                                               st.get("model_key"), it, ot)
+                                               ident.get("key"),
+                                               ident.get("model") or st.get("model_key"),
+                                               ident.get("version"), ident.get("engine"),
+                                               it, ot)
             metadb.ledger_update(_db_conn, -1, None, None, pw)  # idle energy
         _db_conn.commit()
         if time.time() - _db_last_prune_check > 86400:
@@ -1633,8 +1704,7 @@ def _db_maybe_write(gpu_info_now):
         # visible (journald doesn't capture this unit's stderr)
         try:
             import traceback as _tb
-            with open(os.path.join(BASE_DIR, "logs", "dbwriter.err"), "a") as _f:
-                _tb.print_exc(file=_f)
+            dlog("dbwriter exception:\n" + _tb.format_exc())
         except Exception:
             pass
         try:
@@ -1893,6 +1963,23 @@ def engines_fleet():
             pid, rss_gib = _main_pid_rss(unit)
             d = u["derived"]
             port = d["port"] or entry.get("port")
+            proc = _engine_proc(port)
+            # Launcher units (ds4-serve / docker start.sh) carry no --model on
+            # ExecStart, so d["model"] is None. Resolve the real host path from
+            # the live process arg or the docker bind-mount source. When the
+            # unit parser already found a model (regular llama units) it's
+            # authoritative and wins.
+            model_path = d["model"]
+            if not model_path:
+                model_path = _host_model_for_unit(
+                    port, proc, d["model"], entry, u.get("_binary"))
+            sniffed = d["fork"] or catalog.infer_engine(u.get("_binary"))
+            # launcher-script units (docker start.sh wrappers) expose no
+            # engine in their binary; the live metrics signature is
+            # definitive when the engine answers on its port.
+            with eng_metrics["lock"]:
+                st = eng_metrics["engines"].get(port)
+            live, _mc = _live_backend(port, st, model_path)
             fleet.append({
                 "kind": "unit",
                 "name": unit,
@@ -1902,15 +1989,16 @@ def engines_fleet():
                 "enabled": enabled,
                 "pid": pid,
                 "rss_gib": rss_gib,
-                "engine": d["fork"] or catalog.infer_engine(u.get("_binary")),
-                "model": d["model"],
-                "model_short": (d["model"] or "").rsplit("/", 1)[-1] if d["model"] else None,
+                "engine": live if live != "unknown" else sniffed,
+                "model": model_path,
+                "model_short": (model_path or "").rsplit("/", 1)[-1] if model_path else None,
                 "port": port,
                 "host": d["host"],
                 "ctx": d["ctx"],
                 "parallel": d["parallel"],
                 "spec_type": d["spec_type"],
                 "alias": d["alias"],
+                **_slot_util(st),
             })
         elif kind == "docker":
             c = next((x for x in catalog.docker_containers() if x["name"] == name), None)
@@ -1937,6 +2025,13 @@ def engines_fleet():
                         except ValueError:
                             gmu = None
             port = c.get("host_port") or entry.get("port")
+            with eng_metrics["lock"]:
+                st = eng_metrics["engines"].get(port)
+            live, _mc = _live_backend(port, st, None)
+            if live == "unknown":
+                # metrics not scraped yet: the image-name tag from the
+                # docker scan (sglang vs vllm) is the best static signal
+                live = c.get("engine") or "vllm"
             fleet.append({
                 "kind": "docker",
                 "name": name,
@@ -1946,11 +2041,12 @@ def engines_fleet():
                 "enabled": "n/a",
                 "status": c["status"],
                 "port": port,
-                "engine": "vllm",
+                "engine": live,
                 "model": rec.get("model") if isinstance(rec, dict) else None,
                 "model_short": (rec.get("model") or "").rsplit("/", 1)[-1] if isinstance(rec, dict) and rec.get("model") else None,
                 "gpu_mem_util": gmu,
                 "rss_gib": None,
+                **_slot_util(st),
             })
         elif kind == "port":
             # bare endpoint: name is the label, port is the handle. No unit,
@@ -1977,6 +2073,8 @@ def engines_fleet():
             if owned:
                 backend = owned if owned in ("sglang", "vllm", "llama", "llamacpp") else None
             proc = _engine_proc(port) if port else None
+            with eng_metrics["lock"]:
+                st = eng_metrics["engines"].get(port)
             if proc:
                 base = proc["base"]
                 if not backend:
@@ -2003,6 +2101,7 @@ def engines_fleet():
                 "model_short": (model or "").rsplit("/", 1)[-1] if model else None,
                 "gpu_mem_util": None,
                 "rss_gib": None,
+                **_slot_util(st),
             })
     return {"fleet": fleet, "gpu_used_gib": gpu_used_gib, "port_conflicts": _port_conflicts(fleet)}
 
@@ -2236,6 +2335,51 @@ def load_metrics_page():
         return f.read()
 
 
+def _slot_util(st):
+    """Live slot utilization for one engine, read from the latest sample in
+    its scrape ring: how many of its concurrent request slots (capacity) are
+    occupied, and how many requests queue behind them. cap may be None
+    (engine down / capacity flag not detected) -> all None."""
+    cap = st.get("slot_cap") if st else None
+    run_now = wait_now = None
+    if st and st.get("samples"):
+        run_now = _g(st["samples"][-1][1], "vllm:num_requests_running")
+        wait_now = _g(st["samples"][-1][1], "vllm:num_requests_waiting")
+    return {"slot_cap": cap, "slot_running": run_now, "slot_waiting": wait_now,
+            "slot_util_pct": round(100.0 * run_now / cap, 1)
+            if cap and run_now is not None else None}
+
+
+def _slot_history_kpis(rows):
+    """Window KPIs for the SLOTS card from decimated DB rows: the lane's
+    capacity, average concurrency, time pinned at capacity (the saturation
+    signal), total queued requests, and where the served model CHANGED
+    mid-window (single-lane box: a model flip = a lane swap, marked on the
+    chart). All None-safe: a window with no running samples -> None KPIs."""
+    run = [r.get("running") for r in rows]
+    wait = [r.get("waiting") for r in rows]
+    caps = [r.get("slot_cap") for r in rows if r.get("slot_cap")]
+    models = [r.get("model") for r in rows]
+    cap = max(caps) if caps else None
+    observed = [v for v in run if v is not None]
+    if not observed:
+        return {"cap": cap, "avg_concurrency": None, "pct_at_cap": None,
+                "wait_total": None, "model_flips": []}
+    at_cap = sum(1 for v in observed if cap and v >= cap - 1e-9)
+    flips = []
+    prev = None
+    for i, m in enumerate(models):
+        if m and (prev is None or m != prev):
+            if prev is not None:
+                flips.append(i)
+            prev = m
+    return {"cap": cap,
+            "avg_concurrency": round(sum(observed) / len(observed), 2),
+            "pct_at_cap": round(100.0 * at_cap / len(observed), 1) if cap else None,
+            "wait_total": int(sum(v or 0 for v in wait)),
+            "model_flips": flips}
+
+
 def api_metrics(window_s, live_only=False):
     """Live / fast view: per-engine stats + series from in-memory ring buffers,
     the host gauges (CPU/mem/disk/load/net), and the GPU hardware card.
@@ -2272,35 +2416,14 @@ def api_metrics(window_s, live_only=False):
             # a bare endpoint with no /metrics.
             # model_cmdline: the real model path from the process scan
             # (llama.cpp emits no model_name label — the only source).
-            e["backend"] = "unknown"
-            if st.get("has_metrics") and st["samples"]:
-                last_p = st["samples"][-1][1]
-                if _is_llamacpp_sample(last_p):
-                    e["backend"] = "llama"
-                elif _is_sglang_sample(last_p):
-                    e["backend"] = "sglang"
-                elif _is_ds4_sample(last_p):
-                    e["backend"] = "ds4"
-                else:
-                    e["backend"] = "vllm"
-            proc = _engine_proc(port)
-            if proc:
-                m = _arg(proc["args"], "--model") or _arg(proc["args"], "-m") \
-                    or _arg(proc["args"], "--model-path")
-                e["model_cmdline"] = os.path.basename(m) if m else None
-                if "sglang" in " ".join(proc["args"][:2]) and e["backend"] in ("unknown", "vllm"):
-                    e["backend"] = "sglang"
-                if e["backend"] == "unknown" and "llama-server" in proc["base"]:
-                    e["backend"] = "llama"
-            if e["backend"] == "unknown" and e.get("model") is not None:
-                # a configured engine that answered /v1/models: the id/owned_by
-                # tells us the serving engine (owned_by=="sglang" is definitive)
-                if "sglang" in str(e.get("model", "")):
-                    e["backend"] = "sglang"
+            e["backend"], e["model_cmdline"] = _live_backend(port, st, e.get("model"))
+            e.update(_slot_util(st))
             if st.get("has_metrics"):
                 e["stats"] = _window_stats(st, window_s)
                 e["series"] = _engine_series(st, window_s)
                 e["spec"] = _engine_spec(port, window_s, e["stats"])
+                e["slot_series"] = e["series"].get("slot_series")
+                e["slot_live"] = _live_slot_state(st)
                 if e["stats"].get("in_tokens") is not None:
                     in_t += e["stats"]["in_tokens"]; saw_tok = True
                 if e["stats"].get("out_tokens") is not None:
@@ -2385,6 +2508,249 @@ def _engine_proc(port):
     if len(_PROC_CACHE) > 32:
         _PROC_CACHE.clear()
     return found
+
+
+def _host_model_for_unit(port, proc, derived_model, entry, binary):
+    """Resolve the host on-disk path of the model a launcher unit serves.
+
+    Launcher units (ds4-serve scripts, docker start.sh wrappers) carry no
+    --model flag on ExecStart, so parse_unit derives nothing. The real path is
+    the engine process's own --model/-m/--model-path arg, read from /proc:
+      * ds4 runs on the host -> that arg is already a host path
+        (/opt/models/gguf/….gguf).
+      * sglang runs in a container -> that arg is a container path
+        (/models/main); map it to its host bind-mount source
+        (/opt/sglang_models/…/main) via the container that exposes `port`.
+    A proc arg that exists on the host is trusted as-is; one that does not is
+    treated as a container path and mapped. Falls back to the config 'model'
+    override, then the raw proc arg, then the unit-derived model. Returns the
+    best host path or None."""
+    proc_model = None
+    if proc:
+        proc_model = (_arg(proc["args"], "--model")
+                      or _arg(proc["args"], "-m")
+                      or _arg(proc["args"], "--model-path"))
+    if proc_model:
+        # host path that actually exists -> definitive (ds4 on the host).
+        if os.path.exists(proc_model):
+            return proc_model
+        # container path (not present on host) -> resolve its bind-mount source
+        # (sglang's /models/main <- host /opt/sglang_models/…/main).
+        host = _container_path_to_host(port, proc_model)
+        if host:
+            return host
+        # container path we couldn't map: prefer a config override, else the
+        # in-container path over nothing (better than a blank card).
+        return entry.get("model") or proc_model
+    # no live process (engine down): read the launcher script's own defaults
+    # (ds4-serve's DS4_GGUF_DIR + GGUF_FILE), then a config override, then any
+    # unit-derived model.
+    return _launcher_script_model(binary) or entry.get("model") \
+        or derived_model
+
+
+def _shell_expand(val):
+    """Expand shell-style $HOME / ~ prefixes that os.path.expanduser misses.
+    expanduser handles '~' but not '$HOME'; the launcher scripts use the
+    latter. Translate the common cases to a real host path."""
+    if not val:
+        return val
+    home = os.environ.get("HOME") or ""
+    if val in ("$HOME", "~"):
+        return home
+    if val.startswith("$HOME/"):
+        return home + "/" + val[len("$HOME/"):]
+    if val.startswith("~/"):
+        return home + "/" + val[len("~/"):]
+    return os.path.expanduser(val)
+
+
+def _launcher_script_model(binary):
+    """For a launcher binary that is a shell script (e.g. ~/.local/bin/ds4-serve),
+    read its model-file default from its own `VAR="${VAR:-default}"` lines so
+    the card shows the real path even when the engine is down. ds4-serve sets
+    DS4_GGUF_DIR (dir) and GGUF_FILE (basename); the served model is
+    $DS4_GGUF_DIR/$GGUF_FILE. Returns a host path or None. Reads the actual
+    script, so it tracks whatever the user edited — no hardcoded path."""
+    if not binary:
+        return None
+    try:
+        path = _shell_expand(binary)
+        if not os.path.isfile(path) or not os.access(path, os.R_OK):
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        if not text.startswith("#!"):
+            return None
+        # VAR="${VAR:-default}"  (also tolerate VAR=${VAR:-default} unquoted)
+        m = re.search(r'ds4_gguf_dir="?\$\{ds4_gguf_dir:-([^"]+)\}"?', text, re.I)
+        d = _shell_expand(m.group(1).strip()) if m else _shell_expand("~") + "/gguf"
+        g = re.search(r'gguf_file="?\$\{gguf_file:-([^"]+)\}"?', text, re.I)
+        if not g:
+            return None
+        fname = g.group(1).strip()
+        return os.path.join(d, fname)
+    except Exception:
+        return None
+
+
+def _container_path_to_host(port, container_path):
+    """For a docker-launched engine on `port`, map an in-container path to its
+    host bind-mount source by finding the running container that exposes
+    `port` and a bind mount whose destination is a prefix of container_path.
+    e.g. container_path='/models/main', mount src='/opt/x' dst='/models'
+    -> '/opt/x/main'. Returns None when no match."""
+    try:
+        for c in catalog.docker_containers(include_exited=False):
+            if c.get("running") and c.get("host_port") == port:
+                try:
+                    d = catalog._docker_inspect_json(c["name"])
+                except Exception:
+                    continue
+                for b in (d.get("HostConfig", {}).get("Binds") or []):
+                    parts = b.split(":")
+                    if len(parts) < 2:
+                        continue
+                    src, dst = parts[0], parts[1]
+                    dst = dst.rstrip("/")
+                    if not dst:
+                        dst = "/"
+                    if dst == "/" or container_path == dst \
+                            or container_path.startswith(dst + "/"):
+                        suffix = container_path[len(dst):].lstrip("/")
+                        return src.rstrip("/") + ("/" + suffix if suffix else "")
+    except Exception:
+        pass
+    return None
+
+
+def _live_backend(port, st, model_cfg):
+    """Shared serving-engine signature: metric sample first (unique per
+    engine — definitive even for docker-launched engines where no host
+    process is bound to the port), then the process scan, then the
+    /v1/models model-id hint. Returns (backend, model_cmdline) where
+    model_cmdline is the real --model filename from the process scan
+    (llama.cpp emits no model_name label — the only source) or None."""
+    backend = "unknown"
+    model_cmdline = None
+    if st is not None and st.get("has_metrics") and st.get("samples"):
+        last_p = st["samples"][-1][1]
+        if _is_llamacpp_sample(last_p):
+            backend = "llama"
+        elif _is_sglang_sample(last_p):
+            backend = "sglang"
+        elif _is_ds4_sample(last_p):
+            backend = "ds4"
+        else:
+            backend = "vllm"
+    proc = _engine_proc(port) if port else None
+    if proc:
+        m = _arg(proc["args"], "--model") or _arg(proc["args"], "-m") \
+            or _arg(proc["args"], "--model-path")
+        model_cmdline = os.path.basename(m) if m else None
+        if "sglang" in " ".join(proc["args"][:2]) and backend in ("unknown", "vllm"):
+            backend = "sglang"
+        if backend == "unknown" and "llama-server" in proc["base"]:
+            backend = "llama"
+    if backend == "unknown" and model_cfg is not None:
+        # a configured engine that answered /v1/models: the id/owned_by
+        # tells us the serving engine (owned_by=="sglang" is definitive)
+        if "sglang" in str(model_cfg):
+            backend = "sglang"
+    return backend, model_cmdline
+
+
+_SHARD_RE = re.compile(r"-\d{5}-of-\d{5}(?:-\d{5}-of-\d{5})*")
+
+
+def _strip_shards(name):
+    """'X-00001-of-00004' -> 'X': shard suffixes are storage, not version."""
+    return _SHARD_RE.sub("", str(name))
+
+
+_SLOT_CAP_FLAGS = {
+    "sglang": ("--max-running-requests",),
+    "vllm": ("--max-num-seqs",),
+    "llama": ("--parallel",),
+    "ds4": ("--max-concurrent",),
+}
+
+
+def _slot_capacity(port, st, backend):
+    """The engine's concurrent request SLOTS: the max running/parallel
+    requests it can serve at once.
+
+    sglang --max-running-requests, vLLM --max-num-seqs, llama.cpp
+    --parallel, ds4 --max-concurrent. Read from the live process cmdline
+    (world-readable /proc, works for container engines — the container's
+    process is on the same host) so it follows model swaps and restarts.
+    Returns an int or None when the flag is absent / engine down."""
+    # llama: prefer the live /slots count (n_parallel runtime truth) — it's
+    # already fetched every poll and tracks restarts more faithfully than
+    # the cmdline flag.
+    if backend == "llama" and st and st.get("n_slots"):
+        return int(st["n_slots"])
+    proc = _engine_proc(port) if port else None
+    if not proc:
+        return None
+    for flag in _SLOT_CAP_FLAGS.get(backend, ()) or _SLOT_CAP_FLAGS["vllm"]:
+        v = _arg(proc["args"], flag)
+        if v:
+            try:
+                return int(float(v))
+            except ValueError:
+                continue
+    return None
+
+
+def _model_version(port, st, backend):
+    """The on-disk artifact = the model VERSION.
+
+      llama/ds4/vllm: the engine process's --model/-m/--model-path filename
+        (GGUF basenames already carry quant + date — that IS the version).
+      sglang: the host bind-mount source dir of the in-container model path
+        (the recipe dir, e.g. 'qwen38-27b-recipe' — swapping in a new
+        quantization means a new dir, so the counter follows automatically).
+    Returns None when the artifact can't be resolved (version unknown — the
+    key then collapses to model+engine)."""
+    proc = _engine_proc(port) if port else None
+    if not proc:
+        return None
+    m = _arg(proc["args"], "--model") or _arg(proc["args"], "-m") \
+        or _arg(proc["args"], "--model-path")
+    if not m:
+        return None
+    if os.path.isfile(m):
+        return _strip_shards(_short_model(os.path.basename(m)))
+    if os.path.isdir(m):
+        # a model ROOT dir (HF-style): the leaf ('main') is not the version —
+        # the recipe dir above it is. /opt/…/qwen38-27b-recipe/main ->
+        # 'qwen38-27b-recipe'. Swap the quantization = new recipe dir.
+        return _strip_shards(_short_model(os.path.basename(os.path.dirname(m))))
+    host = _container_path_to_host(port, m) if backend == "sglang" else None
+    if host:
+        if os.path.isdir(host):
+            return _strip_shards(_short_model(os.path.basename(os.path.dirname(host))))
+        return _strip_shards(_short_model(os.path.basename(host)))
+    return _strip_shards(_short_model(os.path.basename(m)))
+
+
+def _model_identity(port, st):
+    """Composite ledger identity: (model base, version, engine) -> key.
+
+    One row per (model, version, engine): the same base served on two lanes,
+    or in two quants, is two rows. `key` is NUL-joined — model names never
+    contain NULs, so collisions are impossible. Computed every scrape so a
+    model/quant/engine swap on a port is attributed to the right row."""
+    base = _strip_shards(_short_model(st.get("model_live")
+                                      or st.get("model_cmdline")
+                                      or st.get("model")
+                                      or f"port {port}"))
+    backend = _live_backend(port, st, None)[0]
+    engine = f"{backend}:{port}"
+    version = _model_version(port, st, backend)
+    return {"key": "\u0000".join([base, version or "?", engine]),
+            "model": base, "version": version, "engine": engine}
 
 
 def _proc_unit(pid):
@@ -2619,12 +2985,19 @@ def api_metrics_history(port, span_s):
     if port is None:
         port = _default_metrics_port()
         if port is None:
-            return {"port": None, "model": None, "span_s": span_s,
+            return {"port": None, "model": None, "backend": None, "span_s": span_s,
                     "points": 0, "series": {"ts": []}, "gpu": {"ts": []},
                     "gpu_hw": gpu_hw(),
                     "tokens": {"in_tokens": 0, "out_tokens": 0},
                     "cost": _cost_block(0, 0, 0)}
     since = int(time.time()) - span_s
+    # backend pill for the strip: the engine is single-lane, so the LIVE
+    # signature of this port IS the lane's backend (a model flip keeps the
+    # backend, and the strip label is about the current lane anyway).
+    _st = None
+    with eng_metrics["lock"]:
+        _st = eng_metrics["engines"].get(port)
+    backend, _mc = _live_backend(port, _st, None)
     c = metadb.connect(DB_PATH, readonly=True)
     try:
         rows = metadb.query_range(c, port, since, limit=1440)
@@ -2646,13 +3019,11 @@ def api_metrics_history(port, span_s):
     gpu = {k: [r.get(k) for r in gpu_rows] for k in
            ("ts", "sm_clock_mhz", "temp_c", "power_w", "throttle_active",
             "util_pct", "nvme_c")}
-    # running/waiting live gauges aren't sampled into the DB; keep them
-    # present but null so the client's mean() stays uniform
-    series["running"] = [None] * len(rows)
-    series["waiting"] = [None] * len(rows)
-    resp = {"port": port, "model": model, "span_s": span_s,
+    resp = {"port": port, "model": model, "backend": backend,
+            "span_s": span_s,
             "points": len(rows), "series": series, "gpu": gpu,
             "gpu_hw": gpu_hw(),
+            "slot": _slot_history_kpis(rows),
             "spec": _engine_spec(port, span_s),
             "tokens": {"in_tokens": tok["in_tokens"],
                        "out_tokens": tok["out_tokens"]},
@@ -3147,9 +3518,11 @@ class H(BaseHTTPRequestHandler):
                         it, ot = _lifetime_token_counters(st)
                         if it is not None:
                             live_counters[port] = (it, ot)
-                            mk = st.get("model_key")
-                            if mk and mk != f"port {port}":
-                                live_models[port] = (mk, it, ot)
+                            ident = st.get("model_identity") or {}
+                            if ident.get("key") and ident.get("model") != f"port {port}":
+                                live_models[port] = (ident["key"], ident.get("model"),
+                                                     ident.get("version"), ident.get("engine"),
+                                                     it, ot)
                 # NEVER the poller's _db_conn: ThreadingHTTPServer runs this
                 # handler on a request thread, and sqlite3 raises
                 # "created in a thread can only be used in that same thread"
@@ -3165,11 +3538,11 @@ class H(BaseHTTPRequestHandler):
                     elif action == "models":
                         metadb.reset_models(rc, live_models)
                     elif action == "model":
-                        model = body.get("model")
-                        if not model:
-                            err("model name required")
+                        mkey = body.get("key") or body.get("model")
+                        if not mkey:
+                            err("model key required")
                             return
-                        metadb.reset_model(rc, model, live_models)
+                        metadb.reset_model(rc, mkey, live_models)
                     elif action == "energy":
                         metadb.reset_energy(rc)
                     elif action == "all":
@@ -3332,5 +3705,5 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     threading.Thread(target=loop, daemon=True).start()
     srv = ThreadingHTTPServer((HOST, PORT), H)
-    print(f"dashboard on http://{HOST}:{PORT}")
+    dlog(f"dashboard on http://{HOST}:{PORT} (pid {os.getpid()})")
     srv.serve_forever()

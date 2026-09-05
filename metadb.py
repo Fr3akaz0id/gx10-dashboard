@@ -16,7 +16,7 @@ SAMPLE_COLS = ["ts", "port", "model", "kv_pct", "running", "waiting",
                "prefix_hit_rate", "spec_acceptance", "preempt_per_min",
                "total_tokens", "finish_per_min", "http_2xx_per_min",
                "http_4xx_per_min", "prompt_cached_pct",
-               "in_tokens", "out_tokens"]
+               "in_tokens", "out_tokens", "slot_cap", "slot_running"]
 
 GPU_COLS = ["ts", "sm_clock_mhz", "sm_clock_max_mhz", "throttle_active",
             "throttle_sw_thermal_us", "throttle_hw_thermal_us",
@@ -60,16 +60,23 @@ CREATE TABLE IF NOT EXISTS counter_watermarks (
   out_tokens_max REAL
 );
 CREATE TABLE IF NOT EXISTS model_ledger (
+  key TEXT NOT NULL PRIMARY KEY,
   model TEXT NOT NULL,
+  version TEXT,
+  engine TEXT,
   in_tokens_cum REAL NOT NULL DEFAULT 0,
   out_tokens_cum REAL NOT NULL DEFAULT 0,
+  in_initial_cum REAL NOT NULL DEFAULT 0,
+  out_initial_cum REAL NOT NULL DEFAULT 0,
   first_ts INTEGER,
-  last_ts INTEGER,
-  PRIMARY KEY (model)
+  last_ts INTEGER
 );
 CREATE TABLE IF NOT EXISTS model_watermarks (
   port INTEGER PRIMARY KEY,
+  key TEXT,
   model TEXT,
+  version TEXT,
+  engine TEXT,
   in_tokens_max REAL,
   out_tokens_max REAL
 );
@@ -85,8 +92,10 @@ MIGRATE_V2 = [
     ("samples", "in_tokens", "REAL"),
     ("samples", "out_tokens", "REAL"),
     ("samples", "ttft_p99", "REAL"),
+    ("samples", "slot_cap", "REAL"),
+    ("samples", "slot_running", "REAL"),
 ]
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def connect(path, readonly=False):
@@ -109,12 +118,60 @@ def init_db(path):
     for table, col, typ in MIGRATE_V2:
         if col not in have:
             c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    _migrate_model_ledger_v4(c)
     cur_v = c.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
     if not cur_v or int(cur_v["value"]) < SCHEMA_VERSION:
         c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)",
                   (str(SCHEMA_VERSION),))
     c.commit()
     c.close()
+
+
+def _migrate_model_ledger_v4(c):
+    """v4: model_ledger gains (key, version, engine, *_initial_cum).
+
+    Old rows are keyed on the bare model string; the key format is
+    '<model>\\u0000<version>\\u0000<engine>', so a pre-migration model string
+    can never collide with a post-migration key. Rebuild the table in place,
+    carrying every old row over verbatim with version/engine left NULL and a
+    NULL watermark-model marker: on the next credit the model is treated as
+    new (fresh lifetime credit, flagged initial)."""
+    have = {r[1] for r in c.execute("PRAGMA table_info(model_ledger)")}
+    if "key" in have:
+        return
+    c.execute("ALTER TABLE model_ledger RENAME TO model_ledger_v3")
+    c.execute("""CREATE TABLE model_ledger (
+      key TEXT NOT NULL PRIMARY KEY,
+      model TEXT NOT NULL,
+      version TEXT,
+      engine TEXT,
+      in_tokens_cum REAL NOT NULL DEFAULT 0,
+      out_tokens_cum REAL NOT NULL DEFAULT 0,
+      in_initial_cum REAL NOT NULL DEFAULT 0,
+      out_initial_cum REAL NOT NULL DEFAULT 0,
+      first_ts INTEGER,
+      last_ts INTEGER)""")
+    c.execute("""INSERT INTO model_ledger (key, model, version, engine,
+                   in_tokens_cum, out_tokens_cum, in_initial_cum, out_initial_cum,
+                   first_ts, last_ts)
+                 SELECT model, model, NULL, NULL,
+                        in_tokens_cum, out_tokens_cum,
+                        in_tokens_cum, out_tokens_cum,
+                        first_ts, last_ts FROM model_ledger_v3""")
+    # legacy rows are themselves the unobserved history — count them as
+    # initial credit so the observed-vs-unobserved split stays honest
+    c.execute("DROP TABLE model_ledger_v3")
+    # model_watermarks gains (key, version, engine) — in place, ADD COLUMN.
+    # We KEEP the existing watermark rows on purpose: their in/out_max are
+    # each port's lifetime counters at the last flush. On the first flush
+    # after migration the new composite key differs from the legacy key, so
+    # model_ledger_update credits only the growth since that watermark —
+    # NOT the whole lifetime counter — so the carried-over legacy row and
+    # the fresh composite row never double-count the same tokens.
+    wm_have = {r[1] for r in c.execute("PRAGMA table_info(model_watermarks)")}
+    for col, typ in (("key", "TEXT"), ("version", "TEXT"), ("engine", "TEXT")):
+        if col not in wm_have:
+            c.execute(f"ALTER TABLE model_watermarks ADD COLUMN {col} {typ}")
 
 
 def write_sample(c, row):
@@ -294,61 +351,94 @@ def ledger_update(c, port, in_total, out_total, power_w, ts=None):
               "out_tokens_max) VALUES (?,?,?)", (port, w_in, w_out))
 
 
-def model_ledger_update(c, port, model, in_total, out_total, ts=None):
+def model_ledger_update(c, port, key, model, version, engine, in_total, out_total, ts=None):
     """Credit one engine's counter reading into the PER-MODEL ledger.
-    Watermarks are keyed per port + carry the model they belong to: when the
-    running model changes on a port, the old watermark is discarded and the
-    new model's counter starts from zero credit. Counter resets (engine
-    restart: reading below watermark, SAME model) credit the new reading.
+
+    Attribution = (model, version, engine): the composite `key` — two lanes
+    serving the same model base (or two quants of it) are separate rows.
+
+    Credit rules (the engine counter is ONE lifetime counter per port, so
+    every credit is a reading against the previous port watermark):
+      * same key as last observation: delta vs watermark (normal credit).
+      * key changed on the port, counter grew since: only the growth
+        (reading - previous watermark) is credited — NOT the lifetime
+        counter. The pre-switch history stays on the old key's row.
+      * counter reset (reading below previous watermark): the new reading
+        is credited; if the key also changed, the pre-restart counter can't
+        be attributed, so it is marked INITIAL (unobserved history).
+      * first-ever observation on the port (no prior watermark): the
+        lifetime counter is credited and marked INITIAL — the engine really
+        served those tokens, the dashboard just wasn't watching.
+
+    `*_initial_cum` accumulates the initial/unobserved part so the UI can
+    show 'incl. N unobserved' instead of letting it read as fresh usage.
     None counters skip token work entirely."""
     now = int(ts or time.time())
-    if not model:
+    if not key:
         return
-    wm = c.execute("SELECT model, in_tokens_max, out_tokens_max FROM "
+    wm = c.execute("SELECT key, in_tokens_max, out_tokens_max FROM "
                    "model_watermarks WHERE port=?", (port,)).fetchone()
-    same = wm is not None and wm["model"] == model
-    w_in = wm["in_tokens_max"] if same else None
-    w_out = wm["out_tokens_max"] if same else None
-    row = c.execute("SELECT in_tokens_cum, out_tokens_cum, first_ts FROM model_ledger "
-                    "WHERE model=?", (model,)).fetchone()
+    same = wm is not None and wm["key"] == key
+    w_in = wm["in_tokens_max"] if wm else None
+    w_out = wm["out_tokens_max"] if wm else None
+    row = c.execute("SELECT in_tokens_cum, out_tokens_cum, in_initial_cum, "
+                    "out_initial_cum, first_ts FROM model_ledger WHERE key=?",
+                    (key,)).fetchone()
     c_in = row["in_tokens_cum"] if row else 0.0
     c_out = row["out_tokens_cum"] if row else 0.0
+    c_ini = row["in_initial_cum"] if row else 0.0
+    c_ini_o = row["out_initial_cum"] if row else 0.0
     first = row["first_ts"] if row else now
     if in_total is not None:
-        if w_in is None and row is not None and same:
-            # post-migration baseline adoption: existing cum already covers
-            # history — don't credit the full lifetime counter on top
-            w_in = in_total
+        if w_in is None:
+            # first-ever observation on this port: lifetime counter, flagged
+            c_in += in_total
+            c_ini += in_total
+        elif in_total < w_in:
+            # counter reset (engine restart)
+            c_in += in_total
+            if not same:
+                c_ini += in_total  # pre-restart counter is unattributable
         else:
-            d_in = in_total - w_in if w_in is not None else in_total
-            if d_in < 0:
-                d_in = in_total  # counter reset: new reading is the delta
-            c_in += max(d_in, 0.0)
-            w_in = in_total
+            # normal growth (incl. key change without reset: only the growth
+            # since the last scrape is credited, not the whole lifetime)
+            c_in += in_total - w_in
+        w_in = in_total
     if out_total is not None:
-        if w_out is None and row is not None and same:
-            w_out = out_total
+        if w_out is None:
+            c_out += out_total
+            c_ini_o += out_total
+        elif out_total < w_out:
+            c_out += out_total
+            if not same:
+                c_ini_o += out_total
         else:
-            d_out = out_total - w_out if w_out is not None else out_total
-            if d_out < 0:
-                d_out = out_total
-            c_out += max(d_out, 0.0)
-            w_out = out_total
-    c.execute("INSERT OR REPLACE INTO model_ledger (model, in_tokens_cum, "
-              "out_tokens_cum, first_ts, last_ts) VALUES (?,?,?,?,?)",
-              (model, c_in, c_out, first, now))
-    c.execute("INSERT OR REPLACE INTO model_watermarks (port, model, "
-              "in_tokens_max, out_tokens_max) VALUES (?,?,?,?)",
-              (port, model, w_in, w_out))
+            c_out += out_total - w_out
+        w_out = out_total
+    c.execute("INSERT OR REPLACE INTO model_ledger (key, model, version, engine, "
+              "in_tokens_cum, out_tokens_cum, in_initial_cum, out_initial_cum, "
+              "first_ts, last_ts) VALUES (?,?,?,?,?,?,?,?,?,?)",
+              (key, model, version, engine, c_in, c_out, c_ini, c_ini_o, first, now))
+    c.execute("INSERT OR REPLACE INTO model_watermarks (port, key, model, "
+              "version, engine, in_tokens_max, out_tokens_max) VALUES (?,?,?,?,?,?,?)",
+              (port, key, model, version, engine, w_in, w_out))
 
 
 def model_ledger_all(c):
-    """Per-model lifetime totals, heaviest first."""
-    rows = c.execute("SELECT model, in_tokens_cum, out_tokens_cum, first_ts, "
+    """Per-(model, version, engine) lifetime totals, heaviest first.
+    observed_in/out = cum minus the initial (unobserved) part."""
+    rows = c.execute("SELECT key, model, version, engine, in_tokens_cum, "
+                     "out_tokens_cum, in_initial_cum, out_initial_cum, first_ts, "
                      "last_ts FROM model_ledger ORDER BY "
                      "(in_tokens_cum+out_tokens_cum) DESC").fetchall()
-    return [{"model": r["model"], "in_tokens": int(r["in_tokens_cum"] or 0),
+    return [{"key": r["key"], "model": r["model"], "version": r["version"],
+             "engine": r["engine"],
+             "in_tokens": int(r["in_tokens_cum"] or 0),
              "out_tokens": int(r["out_tokens_cum"] or 0),
+             "in_initial": int(r["in_initial_cum"] or 0),
+             "out_initial": int(r["out_initial_cum"] or 0),
+             "observed_in": int((r["in_tokens_cum"] or 0) - (r["in_initial_cum"] or 0)),
+             "observed_out": int((r["out_tokens_cum"] or 0) - (r["out_initial_cum"] or 0)),
              "first_ts": r["first_ts"], "last_ts": r["last_ts"]} for r in rows]
 
 
@@ -488,30 +578,32 @@ def reset_tokens(c, live_counters):
 
 def reset_models(c, live_models):
     """T2b: wipe per-model attribution (model_ledger + model_watermarks),
-    rebase each port's model watermark to its live counters."""
+    rebase each port's model watermark to its live counters so the next
+    flush adopts the baseline instead of re-crediting lifetime counters."""
     c.execute("DELETE FROM model_ledger")
     c.execute("DELETE FROM model_watermarks")
-    for port, (model, it, ot) in (live_models or {}).items():
-        c.execute("INSERT OR REPLACE INTO model_watermarks (port, model, "
-                  "in_tokens_max, out_tokens_max) VALUES (?,?,?,?)",
-                  (port, model, it, ot))
+    for port, (key, model, version, engine, it, ot) in (live_models or {}).items():
+        c.execute("INSERT OR REPLACE INTO model_watermarks (port, key, model, "
+                  "version, engine, in_tokens_max, out_tokens_max) VALUES (?,?,?,?,?,?)",
+                  (port, key, model, version, engine, it, ot))
     c.commit()
 
 
-def reset_model(c, model, live_models):
-    """Remove ONE model's card. If it's the currently-running model on some
-    port, rebase that port's watermark so the next flush doesn't credit the
-    full lifetime counter."""
-    c.execute("DELETE FROM model_ledger WHERE model=?", (model,))
-    rows = c.execute("SELECT port FROM model_watermarks WHERE model=?",
-                     (model,)).fetchall()
-    c.execute("DELETE FROM model_watermarks WHERE model=?", (model,))
+def reset_model(c, key, live_models):
+    """Remove ONE (model, version, engine) card. If it's the currently
+    running model on some port, rebase that port's watermark so the next
+    flush doesn't credit the full lifetime counter."""
+    c.execute("DELETE FROM model_ledger WHERE key=?", (key,))
+    rows = c.execute("SELECT port FROM model_watermarks WHERE key=?",
+                     (key,)).fetchall()
+    c.execute("DELETE FROM model_watermarks WHERE key=?", (key,))
     for r in rows:
         if r["port"] in (live_models or {}):
-            m, it, ot = live_models[r["port"]]
-            c.execute("INSERT OR REPLACE INTO model_watermarks (port, model, "
-                      "in_tokens_max, out_tokens_max) VALUES (?,?,?,?)",
-                      (r["port"], m, it, ot))
+            k, m, v, e, it, ot = live_models[r["port"]]
+            c.execute("INSERT OR REPLACE INTO model_watermarks (port, key, model, "
+                      "version, engine, in_tokens_max, out_tokens_max) "
+                      "VALUES (?,?,?,?,?,?,?)",
+                      (r["port"], k, m, v, e, it, ot))
     c.commit()
 
 
@@ -535,10 +627,11 @@ def reset_all(c, live_counters, live_models):
     c.execute("DELETE FROM model_watermarks")
     c.execute("DELETE FROM meta WHERE key LIKE 'ledger_%'")
     _zero_ledger(c, live_counters)
-    for port, (model, it, ot) in (live_models or {}).items():
-        c.execute("INSERT OR REPLACE INTO model_watermarks (port, model, "
-                  "in_tokens_max, out_tokens_max) VALUES (?,?,?,?)",
-                  (port, model, it, ot))
+    for port, (key, model, version, engine, it, ot) in (live_models or {}).items():
+        c.execute("INSERT OR REPLACE INTO model_watermarks (port, key, model, "
+                  "version, engine, in_tokens_max, out_tokens_max) "
+                  "VALUES (?,?,?,?,?,?,?)",
+                  (port, key, model, version, engine, it, ot))
     c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('ledger_backfilled',?)",
               (str(int(time.time())),))
     c.commit()

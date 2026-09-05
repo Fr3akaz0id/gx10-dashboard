@@ -455,8 +455,10 @@ def docker_containers(include_exited=True):
             continue
         name, image, status = parts[0], parts[1], parts[2]
         ports = parts[3] if len(parts) > 3 else ""
-        # keep vllm-family containers (image hint or name hint)
-        if "vllm" not in image.lower() and "vllm" not in name.lower():
+        # keep inference-engine containers (image/name hint: vllm or sglang
+        # — the SGLang image qwen38-27b-sglang-dflash2-sm121 has no "vllm")
+        hint = image.lower() + " " + name.lower()
+        if "vllm" not in hint and "sglang" not in hint:
             continue
         running = status.startswith("Up")
         if not running and not include_exited:
@@ -521,9 +523,14 @@ def recipe_from_inspect(name):
         "workdir": cfg.get("Workdir"),
         "created_from_inspect": d.get("Created"),
     }
-    # derive served model: first positional arg after 'serve'
+    # derive served model: --served-model-name is the true display name when
+    # present, then --model-path, then the first positional arg after 'serve'.
     model = None
-    if "serve" in cmd:
+    if "--served-model-name" in cmd and cmd.index("--served-model-name") + 1 < len(cmd):
+        model = cmd[cmd.index("--served-model-name") + 1]
+    elif "--model-path" in cmd and cmd.index("--model-path") + 1 < len(cmd):
+        model = cmd[cmd.index("--model-path") + 1]
+    elif "serve" in cmd:
         i = cmd.index("serve")
         if i + 1 < len(cmd):
             model = cmd[i + 1]
@@ -730,7 +737,7 @@ def discovery_candidates():
         docker.append({
             "kind": "docker",
             "name": c["name"],
-            "engine": "vllm",
+            "engine": "sglang" if "sglang" in c.get("image", "").lower() else "vllm",
             "port": c.get("host_port"),
             "model": (model or "").rsplit("/", 1)[-1] if model else None,
             "image": c.get("image"),

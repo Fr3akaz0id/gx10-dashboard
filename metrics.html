@@ -77,6 +77,7 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .eback.llama{color:var(--gf-blue);border-color:color-mix(in srgb,var(--gf-blue) 50%,transparent)}
 .eback.vllm{color:var(--gf-orange);border-color:color-mix(in srgb,var(--gf-orange) 50%,transparent)}
 .eback.sglang{color:var(--gf-gold);border-color:color-mix(in srgb,var(--gf-gold) 50%,transparent)}
+.eback.ds4{color:#c678dd;border-color:color-mix(in srgb,#c678dd 50%,transparent)}
 .eback.unknown{color:var(--gf-dim);border-color:var(--gf-edge)}
 .tmute{color:var(--gf-dim);font-size:11px}
 
@@ -238,7 +239,44 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 #hwtip .thr .v{font-weight:700;color:var(--gf-bright);white-space:nowrap}
 .chart-box:hover .hwc{cursor:crosshair}
 /* top GB10 row: detail card (left) + over-time charts (right) */
-.rowhw{grid-template-columns:minmax(320px,5fr) minmax(0,9fr)}
+.rowhw{grid-template-columns:minmax(320px,5fr) minmax(0,5fr) minmax(290px,4.5fr)}
+@media(max-width:1200px){.rowhw{grid-template-columns:minmax(300px,1fr) minmax(0,1fr)}
+  .rowhw .slotcard{grid-column:1/-1}}
+/* SLOTS card: live seat tiles + occupancy over the window (single lane) */
+.slotcard{display:flex;flex-direction:column}
+.slotseats{display:flex;gap:7px;align-items:stretch;flex-wrap:wrap;min-height:58px}
+.slottile{position:relative;flex:1 1 54px;max-width:90px;min-height:58px;border-radius:8px;
+  border:1px solid var(--gf-edge);background:var(--gf-card2);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  transition:border-color .3s,background .3s}
+.slottile .sl{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gf-dim)}
+.slottile .sv{font-size:15px;font-weight:700;font-family:var(--font-data);line-height:1.1}
+.slottile .su{font-size:9px;color:var(--gf-dim);font-family:var(--font-data)}
+.slottile.busy{border-color:color-mix(in srgb,var(--gf-green) 55%,transparent);
+  background:color-mix(in srgb,var(--gf-green) 10%,var(--gf-card2))}
+.slottile.busy .sv{color:var(--gf-bright)}
+.slottile.busy .sl{color:color-mix(in srgb,var(--gf-green) 70%,var(--gf-dim))}
+.slottile:not(.busy) .sv{color:var(--gf-dim);opacity:.4;font-size:10.5px;letter-spacing:.5px}
+.slotqueue{align-self:center;font-size:10.5px;font-family:var(--font-data);
+  color:var(--gf-gold);border:1px solid color-mix(in srgb,var(--gf-gold) 45%,transparent);
+  border-radius:14px;padding:3px 10px;white-space:nowrap}
+.slotqueue.idle{color:var(--gf-dim);border-color:var(--gf-edge)}
+.slotchart{flex:1;min-height:56px;display:flex;flex-direction:column;margin-top:9px;min-width:0}
+.slotchart canvas{flex:1;width:100%;min-height:44px;display:block}
+.slotchart .chart-head{margin-bottom:2px}
+.slotkpi{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.slotkpi .kchip{font-size:10px;color:var(--gf-dim);border:1px solid var(--gf-edge);
+  border-radius:14px;padding:2px 9px;font-family:var(--font-data);white-space:nowrap}
+.slotkpi .kchip b{color:var(--gf-txt);font-weight:700}
+.slotkpi .kchip.sat b{color:var(--gf-gold)}
+#slot-tip{position:fixed;z-index:50;pointer-events:none;display:none;min-width:150px;
+  background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:8px;
+  padding:8px 10px;box-shadow:0 8px 28px rgba(0,0,0,.5)}
+#slot-tip .tht{font-size:9.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--gf-dim);margin-bottom:5px}
+#slot-tip .thr{display:flex;align-items:center;gap:6px;font-size:11px;padding:1px 0}
+#slot-tip .thr i{width:8px;height:3px;border-radius:2px;display:inline-block;flex:none}
+#slot-tip .thr .k{color:var(--gf-dim)}
+#slot-tip .thr .v{font-family:var(--font-data);font-weight:600;margin-left:auto}
 @media(max-width:900px){.rowhw{grid-template-columns:1fr}}
 .chart-box{min-width:0}
 .chart-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px}
@@ -311,6 +349,15 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
       <div class="chart-box"><div class="chart-head"><span class="lbl">power</span><span class="chart-val" id="gp-v">–</span></div><canvas class="hwc" id="c-power"></canvas></div>
       <div class="chart-box"><div class="chart-head"><span class="lbl">throttle</span><span class="chart-val" id="gh-v">–</span></div><canvas class="hwc" id="c-throttle"></canvas></div>
     </div>
+  </div>
+  <div class="card slotcard">
+    <h2>SLOTS <span class="info" data-tip="Concurrent request slots of the selected lane — single-lane box, so one capacity at a time. Top: live seats (lit = request in flight, its own tokens/sec; ≈ when the backend exposes no per-request rates, e.g. SGLang — aggregate rate ÷ running seats). Bottom: occupancy across the window (green = running, gold = queue) — avg concurrency and time at capacity are the tuning signal: pinned at cap = saturated, mostly 0 = spare capacity. Vertical dashes mark a model (lane) change mid-window.">i</span></h2>
+    <div class="slotseats" id="slot-seats"></div>
+    <div class="slotchart">
+      <div class="chart-head"><span class="lbl">occupancy · window</span><span class="chart-val" id="slot-v">–</span></div>
+      <canvas id="c-slot"></canvas>
+    </div>
+    <div class="slotkpi" id="slot-kpi"></div>
   </div>
 </div>
 
@@ -665,7 +712,7 @@ function stripName(e){
   return {full:nm,short:nm.length>30?nm.slice(0,29)+'…':nm};
 }
 function chipLabel(e){
-  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang')?e.backend:'?';
+  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang'||e.backend==='ds4')?e.backend:'?';
   var nm=stripName(e).short;
   return b+' · '+esc(nm)+' · :'+e.port+(e.has_metrics?'':' · no metrics');
 }
@@ -783,19 +830,25 @@ function renderMeters(d){
     if(models.length){
       mrow.style.display='';
       setInner('row-models-grid',models.map(function(m){
-        return '<div class="tile" style="min-width:200px;flex:1;position:relative">'
-          +'<button title="remove this model from the ledger" data-model="'+esc(m.model)+'"'
+        var sub=''+fmtTok(m.in_tokens)+' in · '+fmtTok(m.out_tokens)+' out';
+        var tags=(m.engine||'')+(m.version?' · '+esc(m.version):'');
+        var ini=(m.in_initial||0)+(m.out_initial||0);
+        var iniTip=ini>0?('<div class="ts" style="color:var(--dim)" title="'+fmtTok(m.in_initial)+' in · '+fmtTok(m.out_initial)+' out credited at first observation (engine uptime the dashboard did not watch)">'+fmtTok(ini)+' unobserved</div>'):'';
+        return '<div class="tile" style="min-width:210px;flex:1;position:relative;overflow-wrap:anywhere">'
+          +'<button title="remove this model from the ledger" data-model="'+esc(m.model)+'" data-key="'+esc(m.key)+'"'
           +' style="position:absolute;top:6px;right:6px;background:none;border:1px solid var(--card-edge);'
           +'border-radius:6px;color:var(--dim);font-size:10px;padding:1px 6px;cursor:pointer"'
           +' onmouseover="this.style.color=\'var(--bad)\'" onmouseout="this.style.color=\'var(--dim)\'">✕</button>'
-          +'<div class="tt">'+esc(m.model)+'</div>'
+          +'<div class="tt" title="'+esc((m.engine||'')+(m.version?' · '+m.version:''))+'">'+esc(m.model)+'</div>'
           +'<div class="tv">'+fmtTok(m.in_tokens+m.out_tokens)+'</div>'
-          +'<div class="ts">'+fmtTok(m.in_tokens)+' in · '+fmtTok(m.out_tokens)+' out</div>'
+          +'<div class="ts">'+sub+'</div>'
+          +(tags?'<div class="ts" style="color:var(--dim)">'+esc(tags)+'</div>':'')+iniTip
           +'</div>';
       }).join(''));
       var dels=mgrid.querySelectorAll('button[data-model]');
       for(var di=0;di<dels.length;di++){
-        dels[di].addEventListener('click',function(ev){modelDelModal(ev.target.getAttribute('data-model'));});
+        dels[di].addEventListener('click',function(ev){
+          modelDelModal(ev.target.getAttribute('data-model'),ev.target.getAttribute('data-key'));});
       }
     }else{
       mrow.style.display='none';
@@ -817,8 +870,10 @@ function seriesKeys(e,hist){
     ttft95:hist?(sr.ttft_p95||[]):(sr.ttft_p95||[]),
     ttft99:hist?(sr.ttft_p99||[]):(sr.ttft_p99||[]),
     ttftInst:hist?null:(sr.ttft||null),
-    run:hist?null:(sr.running||[]),
-    wait:hist?null:(sr.waiting||[])
+    /* running/waiting ARE stored in SQLite now (samples.running/waiting,
+       30s cadence) — the hopper renders them in history too. */
+    run:sr.running||[],
+    wait:sr.waiting||[]
   };
 }
 function rangeTokens(e,hist,d){
@@ -913,7 +968,7 @@ function renderPanels(eng,hist,d){
     ]);
   }else{
     $('c-hop').width=$('c-hop').height=0;
-    setInner('lg-hop','<div class="tmute" style="font-size:10px;padding:4px 2px">running/waiting are live gauges — not stored in history (1h/24h/7d)</div>');
+    setInner('lg-hop','<div class="tmute" style="font-size:10px;padding:4px 2px">no running/waiting samples in window</div>');
   }
   /* row 3 — host + spec + output tps */
   var h=d.host||{};
@@ -1211,8 +1266,10 @@ function fetchData(){
       if(eng){
         document.body.classList.remove('no-engage');
         renderPanels(eng,hist,d);
+        renderSlots(eng,hist,d);
       }else{
         document.body.classList.add('no-engage');
+        renderSlots(null,hist,d);
       }
       renderGpu(d.gpu_hw,d.gpu_series,false);
     }else{
@@ -1220,14 +1277,16 @@ function fetchData(){
       var eng=null;
       if(d.port!=null){
         eng={port:d.port,label:d.model||'engine',kind:'unit',model:d.model,
-             up:d.points>0,has_metrics:true,stats:{},series:d.series||{}};
+             up:d.points>0,has_metrics:true,backend:d.backend,stats:{},series:d.series||{}};
       }
       renderStrip(eng?[eng]:[],eng);
       if(eng){
         document.body.classList.remove('no-engage');
         renderPanels(eng,hist,d);
+        renderSlots(eng,hist,d);
       }else{
         document.body.classList.add('no-engage');
+        renderSlots(null,hist,d);
       }
       /* gauges stay live (d.gpu_hw); charts follow the window (sqlite d.gpu) */
       renderGpu(d.gpu_hw||null,d.gpu||{ts:[]},true);
@@ -1276,13 +1335,216 @@ function initInfoTips(){
   }
 }
 
+/* ── SLOTS card: live seats + occupancy over the window (single lane) ──
+   Live seats come from the live scrape ring (eng.slot_live); the over-time
+   chart follows the window like every other card: ring (short windows) or
+   SQLite (>=1h). Per-seat tok/s is a MEASUREMENT on llama.cpp (/slots), an
+   estimate (aggregate ÷ running seats) where the backend exposes no
+   per-request rates — marked ≈. */
+var SLOT_CH={ts:[],run:[],wait:[],tps:[],cap:null,n:0};
+var SLOT_HOVER=null;
+function _slotTimeStr(t){
+  if(t==null)return '';
+  var d=new Date(t*1000);
+  function p(x){return (x<10?'0':'')+x;}
+  return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds());
+}
+function drawSlot(){
+  var cv=$('c-slot');if(!cv)return;
+  var ts=SLOT_CH.ts,run=SLOT_CH.run,wait=SLOT_CH.wait,cap=SLOT_CH.cap,n=SLOT_CH.n;
+  var dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  if(!W||!H||!n){if(cv.width){cv.width=cv.height=0;}return;}
+  cv.width=W*dpr;cv.height=H*dpr;
+  var x=cv.getContext('2d');x.scale(dpr,dpr);x.clearRect(0,0,W,H);
+  var yMax=Math.max(cap||0,1),i;
+  for(i=0;i<n;i++){var top=(run[i]!=null?run[i]:0)+(wait[i]!=null?wait[i]:0);if(top>yMax)yMax=top;}
+  var step=n>1?W/(n-1):0;
+  function X(j){return j*step;}
+  function Y(v){return H-3-(v/yMax)*(H-6);}
+  /* grid */
+  x.strokeStyle='rgba(154,163,178,.10)';x.lineWidth=1;
+  [0.25,0.5,0.75].forEach(function(f){var y=Math.round(H*f)+0.5;x.beginPath();x.moveTo(0,y);x.lineTo(W,y);x.stroke();});
+  /* queue band (gold) stacked over the running band (green) */
+  function band(base,hi,col,fill){
+    x.beginPath();
+    for(var j=0;j<n;j++){var b=base[j]!=null?base[j]:0,h=hi[j]!=null?hi[j]:0;
+      if(j===0)x.moveTo(0,Y(b));else x.lineTo(X(j),Y(b));}
+    for(var j2=n-1;j2>=0;j2--){var b2=base[j2]!=null?base[j2]:0,h2=hi[j2]!=null?hi[j2]:0;
+      x.lineTo(X(j2),Y(b2+h2));}
+    x.closePath();
+    if(fill){var gr=x.createLinearGradient(0,0,0,H);gr.addColorStop(0,col+'40');gr.addColorStop(1,col+'0d');x.fillStyle=gr;}
+    else x.fillStyle=col;
+    x.fill();
+  }
+  var rt=[],wt=[];
+  for(i=0;i<n;i++){rt.push(run[i]!=null?run[i]:0);wt.push(wait[i]!=null?wait[i]:0);}
+  band(rt,wt,cssVar('--gf-gold')||'#eab308',false); /* queue: sits on top of the running band */
+  var zeros=[];for(i=0;i<n;i++)zeros.push(0);
+  band(zeros,rt,cssVar('--gf-green')||'#22c55e',true); /* running: base=0 */
+  /* running top line */
+  x.beginPath();
+  for(i=0;i<n;i++){if(i===0)x.moveTo(0,Y(rt[i]));else x.lineTo(X(i),Y(rt[i]));}
+  x.strokeStyle=cssVar('--gf-green')||'#22c55e';x.lineWidth=1.5;x.stroke();
+  /* capacity line */
+  if(cap){
+    x.setLineDash([4,4]);
+    x.strokeStyle='rgba(234,179,8,.5)';x.lineWidth=1;
+    x.beginPath();x.moveTo(0,Y(cap));x.lineTo(W,Y(cap));x.stroke();
+    x.setLineDash([]);
+    x.font='9px '+getComputedStyle(document.body).getPropertyValue('--font-data');
+    x.fillStyle='rgba(234,179,8,.75)';
+    x.fillText('cap '+cap,4,Math.max(9,Y(cap)-4));
+  }
+  /* model (lane) change markers — history only */
+  if(SLOT_CH.flips&&SLOT_CH.flips.length){
+    x.setLineDash([3,5]);
+    x.strokeStyle='rgba(229,233,240,.35)';x.lineWidth=1;
+    for(i=0;i<SLOT_CH.flips.length;i++){var fx=Math.round(X(SLOT_CH.flips[i]))+0.5;
+      x.beginPath();x.moveTo(fx,0);x.lineTo(fx,H);x.stroke();}
+    x.setLineDash([]);
+  }
+  /* crosshair */
+  if(SLOT_HOVER!=null&&SLOT_HOVER>=0&&SLOT_HOVER<=W){
+    x.strokeStyle='rgba(255,255,255,.45)';x.lineWidth=1;
+    x.setLineDash([3,3]);
+    var cx=Math.round(SLOT_HOVER)+0.5;
+    x.beginPath();x.moveTo(cx,0);x.lineTo(cx,H);x.stroke();
+    x.setLineDash([]);
+  }
+}
+function showSlotTip(clientX,clientY,frac){
+  var n=SLOT_CH.n;
+  if(!n){$('slot-tip').style.display='none';return;}
+  var idx=Math.max(0,Math.min(n-1,Math.round(frac*(n-1))));
+  var h='<div class="tht">at '+(_slotTimeStr(SLOT_CH.ts[idx])||('sample '+idx))+'</div>';
+  h+='<div class="thr"><i style="background:'+(cssVar('--gf-green')||'#22c55e')+'"></i><span class="k">running</span><span class="v">'+(SLOT_CH.run[idx]!=null?SLOT_CH.run[idx]:'–')+'</span></div>';
+  h+='<div class="thr"><i style="background:'+(cssVar('--gf-gold')||'#eab308')+'"></i><span class="k">waiting</span><span class="v">'+(SLOT_CH.wait[idx]!=null?SLOT_CH.wait[idx]:'0')+'</span></div>';
+  h+='<div class="thr"><i style="background:var(--gf-dim)"></i><span class="k">rate</span><span class="v">'+(SLOT_CH.tps[idx]!=null?Math.round(SLOT_CH.tps[idx])+' tok/s':'–')+'</span></div>';
+  if(SLOT_CH.flips.length){
+    var near=SLOT_CH.flips.filter(function(f){return Math.abs(f-idx)<2;});
+    if(near.length)h+='<div class="tht" style="margin-top:5px;color:var(--gf-dim)">model (lane) change here</div>';
+  }
+  var tip=$('slot-tip');tip.innerHTML=h;tip.style.display='block';
+  var w=tip.offsetWidth,x2=clientX+16,y2=clientY+16;
+  if(x2+w>window.innerWidth-8)x2=clientX-w-16;
+  if(y2+tip.offsetHeight>window.innerHeight-8)y2=clientY-tip.offsetHeight-16;
+  tip.style.left=x2+'px';tip.style.top=y2+'px';
+}
+function initSlotHover(){
+  var cv=$('c-slot');
+  if(!cv)return;
+  cv.addEventListener('mousemove',function(e){
+    if(!SLOT_CH.n||!cv.width)return;
+    var r=cv.getBoundingClientRect();
+    var frac=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));
+    SLOT_HOVER=frac*cv.width;
+    drawSlot();
+    showSlotTip(e.clientX,e.clientY,frac);
+  });
+  cv.addEventListener('mouseleave',function(){
+    SLOT_HOVER=null;
+    drawSlot();
+    $('slot-tip').style.display='none';
+  });
+}
+function renderSlots(eng,hist,d){
+  var seatsEl=$('slot-seats'),kpiEl=$('slot-kpi');
+  var cap=null,run=0,wait=0,seats=[],busy=[],est=false,orate=null;
+  var series=null,flips=[];
+  var kpi=null;
+  if(!hist&&eng&&eng.slot_live){
+    var L=eng.slot_live;
+    cap=L.cap;run=L.run;wait=L.wait;seats=L.seats||[];busy=L.busy||[];
+    series=eng.slot_series||null;
+    var st=eng.stats||{};
+    orate=st.output_per_s_now!=null?st.output_per_s_now:st.output_per_s;
+    /* estimate: aggregate rate split over running seats when the backend
+       exposes no per-request rates (SGLang/vLLM/ds4). orate 0/null =
+       prefill or a quiet moment -> leave the seat '…' instead of '0'. */
+    if(orate!=null&&orate>0&&run>0&&busy.length&&busy.every(function(v){return v==null;})){
+      var per=Math.round(orate/run*10)/10;
+      busy=busy.map(function(){return per;});est=true;
+    }
+    if(series){
+      var obs=series.running.filter(function(v){return v!=null;});
+      if(obs.length){
+        var sum=0,at=0;
+        for(var i=0;i<obs.length;i++){sum+=obs[i];if(cap&&obs[i]>=cap-1e-9)at++;}
+        kpi={avg:sum/obs.length,at:cap?100*at/obs.length:null,queued:wait,queueNow:true};
+      }
+    }
+  }else if(hist&&d&&d.series){
+    series={ts:d.series.ts||[],running:d.series.running||[],waiting:d.series.waiting||[],out_tps:d.series.out_tps||[]};
+    var S=(d.slot)||null;
+    cap=S?S.cap:null;flips=S?(S.model_flips||[]):[];
+    kpi={avg:S?S.avg_concurrency:null,at:S?pct_at_cap(S):null,queued:S?S.wait_total:null,queueNow:false};
+    var li=-1;
+    for(var j=(series.running||[]).length-1;j>=0;j--)if(series.running[j]!=null){li=j;break;}
+    if(li>=0){
+      run=Math.round(series.running[li]);wait=Math.round(series.waiting[li]||0);
+    }
+    var oarr=series.out_tps||[];
+    for(var j2=oarr.length-1;j2>=0;j2--)if(oarr[j2]!=null){orate=oarr[j2];break;}
+    seats=[];
+    for(var s2=0;s2<(cap||0);s2++)seats.push(s2<run);
+    busy=[];for(var b2=0;b2<run;b2++)busy.push(null);
+  }
+  /* ── seats ── */
+  if(!eng){
+    seatsEl.innerHTML='<div class="slotqueue idle">no lane up</div>';
+  }else if(cap==null){
+    seatsEl.innerHTML='<div class="slotqueue idle">lane not reporting slot capacity</div>';
+  }else{
+    var h='';
+    for(var i=0;i<seats.length;i++){
+      if(seats[i]){
+        var r=busy[i]!=null?busy[i]:null;
+        var title='slot '+(i+1)+(r!=null?(est?' ≈ '+r+' tok/s — estimate: no per-request rates exposed':' '+r+' tok/s — measured per slot (llama /slots)'):' · in flight');
+        h+='<div class="slottile busy" title="'+title+'">'
+         +'<div class="sl">slot '+(i+1)+'</div>'
+         +'<div class="sv">'+(r!=null?r:'…')+'</div>'
+         +'<div class="su">'+(r!=null?((est?'≈ ':'')+'tok/s'):'busy')+'</div></div>';
+      }else{
+        h+='<div class="slottile"><div class="sl">slot '+(i+1)+'</div><div class="sv">idle</div><div class="su">free</div></div>';
+      }
+    }
+    h+='<div class="slotqueue '+(wait>0?'':'idle')+'" title="requests queued behind the slots">'+(wait>0?wait+' waiting':'queue clear')+'</div>';
+    seatsEl.innerHTML=h;
+  }
+  /* ── header value ── */
+  var hv=cap!=null?(run+'/'+cap):'–';
+  if(orate!=null&&cap!=null)hv+=' · '+Math.round(orate)+' tok/s';
+  setText('slot-v',hv);
+  /* ── KPI chips ── */
+  var k='';
+  if(cap!=null)k+='<span class="kchip" title="concurrent request capacity of this lane">cap <b>'+cap+'</b></span>';
+  if(kpi&&kpi.avg!=null)k+='<span class="kchip" title="mean occupied slots over the window">avg <b>'+kpi.avg.toFixed(1)+'</b> conc</span>';
+  if(kpi&&kpi.at!=null)k+='<span class="kchip sat" title="share of samples at full capacity — pinned = saturated"> <b>'+kpi.at.toFixed(0)+'%</b> at cap</span>';
+  if(kpi&&kpi.queued!=null)k+=kpi.queueNow
+    ?'<span class="kchip" title="requests in the queue right now">queue <b>'+kpi.queued+'</b> now</span>'
+    :'<span class="kchip" title="Σ waiting requests over the window (sample-intervals of queue backlog)">Σqueued <b>'+kpi.queued+'</b></span>';
+  kpiEl.innerHTML=k;
+  /* ── over-time chart data ── */
+  if(series&&series.running&&series.running.length){
+    var nn=Math.min(series.running.length,series.ts.length,series.waiting.length);
+    SLOT_CH={ts:series.ts.slice(0,nn),run:series.running.slice(0,nn),
+      wait:series.waiting.slice(0,nn),tps:(series.out_tps||[]).slice(0,nn),
+      cap:cap,flips:flips,n:nn};
+  }else{
+    SLOT_CH={ts:[],run:[],wait:[],tps:[],cap:cap,flips:flips,n:0};
+  }
+  drawSlot();
+}
+function pct_at_cap(S){return S.pct_at_cap==null?null:S.pct_at_cap;}
+
 initHwHover();
+initSlotHover();
 initInfoTips();
 fetchData();
 setInterval(function(){if(!busy)fetchData();},5000);
 
 /* ── per-model delete (TOKENS BY MODEL ✕) ────────────────── */
-function modelDelModal(model){
+function modelDelModal(model, mkey){
   if(document.getElementById('mdel-overlay'))return;
   var ov=document.createElement('div');
   ov.id='mdel-overlay';
@@ -1306,7 +1568,7 @@ function modelDelModal(model){
   ov.querySelector('#mdel-yes').addEventListener('click',function(){
     close();
     fetch('/api/data/reset',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:'model',model:model})})
+      body:JSON.stringify({action:'model',key:mkey||model})})
       .then(function(r){return r.json();})
       .then(function(r){
         var t=document.createElement('div');
@@ -1323,5 +1585,6 @@ function modelDelModal(model){
 }
 </script>
 <div id="hwtip"></div>
+<div id="slot-tip"></div>
 </body>
 </html>

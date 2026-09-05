@@ -27,9 +27,16 @@ Top-level keys: `window_s`, `refresh_s`, `engines`, `host`, `gpu_hw`,
   "engines": [
     { "port": 30000, "kind": "unit", "backend": "sglang", "up": true,
       "has_metrics": true, "model": "...", "label": null,
+      "slot_cap": 4, "slot_running": 2, "slot_waiting": 0,
+      "slot_util_pct": 50.0,               // null when capacity unknown
       "stats": { /* instant rates: out_tps, in_tps, kv_pct, ttft_p50/95/99,
                     running, waiting, req_per_s, spec_acceptance, ... */ },
-      "series": { "ts": [...], /* window series keyed as history below */ } }
+      "series": { "ts": [...], /* window series keyed as history below,
+                                 incl. "slot_series" {ts, running, waiting,
+                                 out_tps} */ },
+      "slot_live": { "cap": 4, "run": 2, "wait": 0,
+                     "seats": [true,true,false,false],
+                     "busy": [21.6, 21.6] } }
   ],
   "host":   { "cpu_pct": ..., "load": ..., "mem": {...}, "disk": {...},
               "gpu_util": ..., "gpu_mem_mib": ... },
@@ -44,8 +51,12 @@ Top-level keys: `window_s`, `refresh_s`, `engines`, `host`, `gpu_hw`,
   "alltime":    { "since_ts": ..., "in_tokens": ..., "out_tokens": ...,
                   "energy_kwh": ..., "energy_usd": ..., "skus": [...],
                   "currency": "EUR",
-                  "models": [ {"model":"...","in_tokens":...,"out_tokens":...,
-                               "first_ts":...,"last_ts":...} ] }
+                  "models": [ {"key":"model\0version\0engine","model":"...",
+                               "version":"...","engine":"sglang:8003",
+                               "in_tokens":..., "out_tokens":...,
+                               "in_initial":..., "out_initial":...,
+                               "observed_in":..., "observed_out":...,
+                               "first_ts":..., "last_ts":...} ] }
 }
 ```
 
@@ -58,7 +69,7 @@ Params: `?port=<int>`, `?span_s=<3600|86400|604800>` (other values snap to
 the nearest). The full span is fetched, then decimated server-side.
 
 ```jsonc
-{ "port": 30000, "model": "...", "span_s": 3600,
+{ "port": 30000, "model": "...", "backend": "sglang", "span_s": 3600,
   "points": 1250,              // a COUNT, not the array!
   "series": { "ts": [...], "out_tps": [...], "in_tps": [...],
               "kv_pct": [...], "ttft_p50": [...], "ttft_p95": [...],
@@ -67,11 +78,19 @@ the nearest). The full span is fetched, then decimated server-side.
               "prefix_hit_rate": [...], "spec_acceptance": [...],
               "preempt_per_min": [...], "total_tokens": [...],
               "in_tokens": [...], "out_tokens": [...], /* ... */ },
+  "slot": { "cap": 4, "avg_concurrency": 1.8, "pct_at_cap": 0.0,
+            "wait_total": 12, "model_flips": [43] },
   "gpu": {...}, "gpu_hw": {...}, "spec": {...},
   "tokens": {...}, "cost": {...}, "cost_today": {...}, "alltime": {...} }
 ```
 
 Arrays under `series.<key>` align index-for-index with `series.ts`.
+`running`/`waiting` are real in history now (samples table stores them at 30 s
+cadence — the old "live gauges not stored" note is obsolete). `slot` is the
+window's KPI block feeding the SLOTS card: capacity, mean occupied slots,
+share of samples pinned at cap (the saturation signal), Σqueued requests, and
+`model_flips` = the series indices where the served model changed mid-window
+(single-lane box: a flip = a lane swap; the card marks them with verticals).
 
 ## GET `/api/engines`
 
@@ -80,7 +99,9 @@ Arrays under `series.<key>` align index-for-index with `series.ts`.
                "image": "...", "active": "active|inactive|failed",
                "enabled": "yes|no", "status": "...", "port": 8080,
                "engine": "llama|vllm|sglang", "model": "...",
-               "model_short": "...", "gpu_mem_util": ..., "rss_gib": ... } ],
+               "model_short": "...", "gpu_mem_util": ..., "rss_gib": ...,
+               "slot_cap": 4, "slot_running": 2, "slot_waiting": 0,
+               "slot_util_pct": 50.0 } ],
   "gpu_used_gib": ...,
   "port_conflicts": { "8889": ["a.service", "b.service"] } }
 ```
@@ -120,8 +141,8 @@ to the system-metrics payload — don't GET it). Probe scans common model dirs
 
 ```jsonc
 // body: {"action": "windows|tokens|models|model|energy|all", ...}
-{"action": "model", "model": "some-model"}          // single model
-{"action": "all", "confirm": "RESET"}               // tiers ≥ T2 need exact "RESET"
+{"action": "model", "key": "model\0version\0engine"}   // single ledger row; "model" also accepted
+{"action": "all", "confirm": "RESET"}                 // tiers ≥ T2 need exact "RESET"
 ```
 
 Response: `{"ok": true, "backup": "/opt/gx10-dashboard/metrics.db.bak-..."}`.
