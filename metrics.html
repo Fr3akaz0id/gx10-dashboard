@@ -351,7 +351,7 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     </div>
   </div>
   <div class="card slotcard">
-    <h2>SLOTS <span class="info" data-tip="Concurrent request slots of the selected lane — single-lane box, so one capacity at a time. Top: live seats (lit = request in flight, its own tokens/sec; ≈ when the backend exposes no per-request rates, e.g. SGLang — aggregate rate ÷ running seats). Bottom: occupancy across the window (green = running, gold = queue) — avg concurrency and time at capacity are the tuning signal: pinned at cap = saturated, mostly 0 = spare capacity. Vertical dashes mark a model (lane) change mid-window.">i</span></h2>
+    <h2>SLOTS <span class="info" data-tip="Concurrent request slots of the selected lane — single-lane box, so one capacity at a time. Top: live seats (lit = request in flight, its own tokens/sec — measured per slot on llama.cpp /slots, measured per request on vLLM from the completion histograms, ≈ estimate on SGLang/ds4 or a quiet vLLM lane = aggregate rate ÷ running seats). Bottom: occupancy across the window (green = running, gold = queue) — avg concurrency and time at capacity are the tuning signal: pinned at cap = saturated, mostly 0 = spare capacity. Vertical dashes mark a model (lane) change mid-window.">i</span></h2>
     <div class="slotseats" id="slot-seats"></div>
     <div class="slotchart">
       <div class="chart-head"><span class="lbl">occupancy · window</span><span class="chart-val" id="slot-v">–</span></div>
@@ -1449,12 +1449,13 @@ function initSlotHover(){
 }
 function renderSlots(eng,hist,d){
   var seatsEl=$('slot-seats'),kpiEl=$('slot-kpi');
-  var cap=null,run=0,wait=0,seats=[],busy=[],est=false,orate=null;
+  var cap=null,run=0,wait=0,seats=[],busy=[],est=false,rsrc=null,orate=null;
   var series=null,flips=[];
   var kpi=null;
   if(!hist&&eng&&eng.slot_live){
     var L=eng.slot_live;
     cap=L.cap;run=L.run;wait=L.wait;seats=L.seats||[];busy=L.busy||[];
+    rsrc=L.src||null;
     series=eng.slot_series||null;
     var st=eng.stats||{};
     orate=st.output_per_s_now!=null?st.output_per_s_now:st.output_per_s;
@@ -1499,7 +1500,9 @@ function renderSlots(eng,hist,d){
     for(var i=0;i<seats.length;i++){
       if(seats[i]){
         var r=busy[i]!=null?busy[i]:null;
-        var title='slot '+(i+1)+(r!=null?(est?' ≈ '+r+' tok/s — estimate: no per-request rates exposed':' '+r+' tok/s — measured per slot (llama /slots)'):' · in flight');
+        var msrc=rsrc=='req'?'measured per request (vLLM completion histograms)'
+               :rsrc=='slot'?'measured per slot (llama /slots)':'measured';
+        var title='slot '+(i+1)+(r!=null?(est?' ≈ '+r+' tok/s — estimate: no per-request rates exposed':' '+r+' tok/s — '+msrc):' · in flight');
         h+='<div class="slottile busy" title="'+title+'">'
          +'<div class="sl">slot '+(i+1)+'</div>'
          +'<div class="sv">'+(r!=null?r:'…')+'</div>'

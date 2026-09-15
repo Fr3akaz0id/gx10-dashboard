@@ -36,7 +36,16 @@ Top-level keys: `window_s`, `refresh_s`, `engines`, `host`, `gpu_hw`,
                                  out_tps} */ },
       "slot_live": { "cap": 4, "run": 2, "wait": 0,
                      "seats": [true,true,false,false],
-                     "busy": [21.6, 21.6] } }
+                     "busy": [21.6, 21.6],
+                     "src": "req" } }
+      //  src: "slot" = per-seat measured (llama.cpp /slots deltas),
+      //       "req"  = measured per-request (vLLM completion histograms:
+      //                 Δrequest_generation_tokens.sum ÷
+      //                 Δrequest_decode_time_seconds.sum over a ~20s trailing
+      //                 window; identical on each busy seat — it measures
+      //                 what one request's speed was, not seat identity),
+      //       null   = no measured rate; the UI renders the ≈ estimate
+      //                 (aggregate output rate ÷ running seats)
   ],
   "host":   { "cpu_pct": ..., "load": ..., "mem": {...}, "disk": {...},
               "gpu_util": ..., "gpu_mem_mib": ... },

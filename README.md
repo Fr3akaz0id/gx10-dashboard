@@ -88,10 +88,13 @@ and [docs/CONFIG.md](docs/CONFIG.md).
   `--max-num-seqs` for vLLM, `--parallel` for llama.cpp preferring the live
   `/slots` count, `--max-concurrent` for ds4). The `/metrics` SLOTS card shows
   live per-slot seats + queue for the selected lane, plus occupancy over the
-  window with avg-concurrency / %-at-cap / queued KPIs. Per-slot tok/s is a
-  real measurement on llama.cpp (`/slots` deltas); backends that expose no
-  per-request rates (SGLang/vLLM/ds4) show an estimate (aggregate ÷ running),
-  marked ≈.
+  window with avg-concurrency / %-at-cap / queued KPIs. Per-seat tok/s is a
+  real measurement where the backend exposes per-request data: per-slot on
+  llama.cpp (`/slots` deltas), per-request on vLLM (diffing the
+  `request_generation_tokens` / `request_decode_time_seconds` completion
+  histograms over a trailing ~20s window). Backends without it (SGLang/ds4)
+  — or a vLLM lane with no request completions in the window — show an
+  estimate (aggregate ÷ running), marked ≈.
 - **Config hot-reload by mtime**: changes made in `/settings` take effect on
   the next poll, no restart. Every save writes a timestamped `.bak` first and
   always goes through a diff preview.

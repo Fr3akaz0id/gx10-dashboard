@@ -421,6 +421,79 @@ def _hist_delta(prev_h, cur_h):
     return {"buckets": out, "sum": ds, "count": dc}
 
 
+# Trailing window for the vLLM measured per-seat rate (see
+# _vllm_measured_seat_rate). Must span several request completions.
+VLLM_SLOT_RATE_WINDOW_S = 20
+
+
+def _vllm_measured_seat_rate(st):
+    """Measured per-request decode rate (tok/s) for a vLLM lane, from the
+    per-request histograms vLLM samples at request completion.
+
+    vLLM exposes no /slots identity — every /metrics series is engine-level
+    (the only labels are {engine, model_name}), so there is no per-seat signal
+    to read the way llama.cpp's /slots gives one. But the request histograms
+    DO carry per-request data: each completed request contributes one
+    observation to vllm:request_generation_tokens (its output length) and to
+    vllm:request_decode_time_seconds (its decode wall time). Over a trailing
+    window, Δ(gen sum) ÷ Δ(decode sum) is a MEASURED tokens-per-second over the
+    requests that finished in that window — the honest "what one request's
+    speed actually was" figure, distinct from the aggregate ÷ running estimate
+    the UI otherwise shows. The inter-token-latency histogram is NOT used: with
+    MTP speculative decoding it is sampled per decode step, not per emitted
+    token, so 1/ITL under-reads the real token rate.
+
+    The ratio is taken across a VLLM_SLOT_RATE_WINDOW_S trailing window, NOT
+    the last two poll samples: vLLM advances these counters only when a request
+    COMPLETES, so a single ~2s tick usually has zero completions even while the
+    engine is generating at full tilt — a last-two-tick diff would report None
+    (dropping the seat to the estimate) for most ticks under load and make the
+    card strobe. Averaging over ~20s catches several completions, so the rate
+    is stable and stays lit through sustained decode, yet the window is short
+    enough that a genuine speed change still surfaces within a few seconds.
+
+    The request_* histograms are emitted only by a real vLLM engine — the
+    sglang/llama/ds4 alias shims never fabricate them — so their presence is
+    itself the proof that this lane is vLLM; no separate backend gate needed.
+
+    Returns (tok_s, n_completed_in_window) or (None, 0) when there is nothing
+    honest to measure: no samples, a too-short window, an engine restart (a
+    negative delta makes _hist_delta return None), or zero requests completed
+    across the whole window (a genuinely quiet lane — fall back to the estimate
+    rather stamp a stale rate).
+    """
+    smp = st.get("samples") if st else None
+    if not smp or len(smp) < 2:
+        return None, 0
+    last_ts, cur = smp[-1][0], smp[-1][1]
+    cutoff = last_ts - VLLM_SLOT_RATE_WINDOW_S
+    # Oldest sample still inside the trailing window = window start point.
+    first_ts, prev = None, None
+    for ts, parsed in smp:
+        if ts >= cutoff:
+            first_ts, prev = ts, parsed
+            break
+    if first_ts is None or last_ts - first_ts < 1.0:   # window too thin to trust
+        return None, 0
+    hists_last = (cur or {}).get("histograms") or {}
+    hists_prev = (prev or {}).get("histograms") or {}
+    gen = _hist_delta(hists_prev.get("vllm:request_generation_tokens"),
+                      hists_last.get("vllm:request_generation_tokens"))
+    dec = _hist_delta(hists_prev.get("vllm:request_decode_time_seconds"),
+                      hists_last.get("vllm:request_decode_time_seconds"))
+    if not gen or not dec:
+        return None, 0
+    # A genuine measurement needs ≥1 request that both completed in the window
+    # (decode count grew) and emitted output (gen sum grew). A pure-prefill or
+    # idle lane has gen.sum 0 → nothing to divide.
+    if not dec["count"] or not dec["sum"] or not gen["sum"]:
+        return None, 0
+    rate = gen["sum"] / dec["sum"]
+    if not (0.5 < rate < 1_000_000):   # sanity band; reject resets/garbage
+        return None, 0
+    return round(rate, 1), int(dec["count"])
+
+
 def _with_llamacpp_aliases(parsed):
     """Map llama.cpp --metrics (llamacpp:*) onto vLLM-shaped alias entries so
     the generic vLLM pipeline (_window_stats/_engine_series/_to_db_row) reads
@@ -844,8 +917,11 @@ def _update_slots(st):
 
 def _live_slot_state(st):
     """Live per-slot occupancy: which seats are busy right now, how many
-    queue behind them, and each busy seat's own decode rate (None when the
-    backend exposes no per-request rates — the UI renders an estimate)."""
+    queue behind them, and each busy seat's own decode rate. `src` names
+    where that rate came from: "slot" = llama.cpp /slots per-seat measurement,
+    "req" = vLLM measured per-request rate from the completion histograms,
+    None = no measured rate (the UI renders the aggregate ÷ running
+    estimate)."""
     if not st:
         return {}
     cap = st.get("slot_cap")
@@ -855,14 +931,27 @@ def _live_slot_state(st):
         run = int(_g(st["samples"][-1][1], "vllm:num_requests_running") or 0)
         wait = int(_g(st["samples"][-1][1], "vllm:num_requests_waiting") or 0)
     seats = [True] * run + [False] * max(0, (cap or 0) - run)
+    src = None
     if tps:
+        # llama.cpp: true per-seat rates from /slots deltas.
         rates = [round(v, 1) for v in tps.values()]
         busy = sorted(rates, reverse=True)[:run]
         while len(busy) < run:
             busy.append(None)
+        src = "slot"
     else:
+        # vLLM: no per-seat identity, but the completion histograms give a
+        # measured PER-REQUEST decode rate — stamp it on the busy seats.
+        # Identical on each seat: it measures what one request's speed was,
+        # not seat-to-seat identity. Quiet lane (no completions in the
+        # window) → None → the UI estimate path stands.
         busy = [None] * run
-    return {"cap": cap, "run": run, "wait": wait, "seats": seats, "busy": busy}
+        mtps, _n = _vllm_measured_seat_rate(st)
+        if mtps is not None and run > 0:
+            busy = [mtps] * run
+            src = "req"
+    return {"cap": cap, "run": run, "wait": wait, "seats": seats,
+            "busy": busy, "src": src}
 
 
 def _is_llamacpp_sample(sample):
