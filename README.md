@@ -95,6 +95,19 @@ and [docs/CONFIG.md](docs/CONFIG.md).
   histograms over a trailing ~20s window). Backends without it (SGLang/ds4)
   — or a vLLM lane with no request completions in the window — show an
   estimate (aggregate ÷ running), marked ≈.
+- **Live token-rate cards.** The OUTPUT/INPUT/TOTAL tok/s cards read the
+  `*_now` fields, a real instantaneous rate rather than a window average.
+  llama.cpp feeds them from per-poll `/slots` deltas. vLLM must not use its
+  `prompt_tokens_total`/`generation_tokens_total` counters for this: those
+  advance only when a request completes, so over a short window the delta is
+  0 for most polls mid-decode, freezing the cards at stale values and
+  collapsing TOTAL onto OUTPUT. vLLM instead measures the rates from the
+  per-request completion histograms (`request_generation_tokens`,
+  `request_prefill_kv_computed_tokens`, plus the decode/prefill time pair)
+  diffed over a trailing ~20s window, so the three cards reconcile by
+  construction. Backends with no such histograms (SGLang) keep the counter
+  delta. A vLLM lane that cannot be honestly measured yet (quiet, or a ring
+  younger than the window right after a restart) renders `–`, never a stale 0.
 - **Config hot-reload by mtime**: changes made in `/settings` take effect on
   the next poll, no restart. Every save writes a timestamped `.bak` first and
   always goes through a diff preview.

@@ -30,7 +30,15 @@ Top-level keys: `window_s`, `refresh_s`, `engines`, `host`, `gpu_hw`,
       "slot_cap": 4, "slot_running": 2, "slot_waiting": 0,
       "slot_util_pct": 50.0,               // null when capacity unknown
       "stats": { /* instant rates: out_tps, in_tps, kv_pct, ttft_p50/95/99,
-                    running, waiting, req_per_s, spec_acceptance, ... */ },
+                    running, waiting, req_per_s, spec_acceptance, ...
+                    plus the live-card trio output_per_s_now /
+                    input_per_s_now / tokens_per_s_now (per-poll live rate,
+                    distinct from the ~10s-window output_per_s / input_per_s /
+                    tokens_per_s): llama.cpp /slots deltas, vLLM measured from
+                    its request_* completion histograms over ~20s so INPUT is
+                    a live rate and TOTAL never clones OUTPUT; null on a vLLM
+                    lane the method cannot yet measure (UI renders the dash)
+                    ... */ },
       "series": { "ts": [...], /* window series keyed as history below,
                                  incl. "slot_series" {ts, running, waiting,
                                  out_tps} */ },
