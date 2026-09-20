@@ -2742,7 +2742,7 @@ def _host_model_for_unit(port, proc, derived_model, entry, binary):
     --model flag on ExecStart, so parse_unit derives nothing. The real path is
     the engine process's own --model/-m/--model-path arg, read from /proc:
       * ds4 runs on the host -> that arg is already a host path
-        (/home/frank/gguf/….gguf).
+        (/opt/models/gguf/….gguf).
       * sglang runs in a container -> that arg is a container path
         (/models/main); map it to its host bind-mount source
         (/opt/sglang_models/…/main) via the container that exposes `port`.
