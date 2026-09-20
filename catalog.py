@@ -621,6 +621,32 @@ _UNIT_ENGINE_HINT = re.compile(r"llama-server|llama-cli|llama-server-bench|ds4-s
 _EXCLUDE_UNITS = {"gx10-dashboard.service"}
 
 
+def _launcher_script_hint(cmd):
+    """Launcher-script units: ExecStart is a bash wrapper (buunq38fn.sh etc.)
+    that execs the real engine — the cmd string alone can't classify it.
+    Peek into the script's head for the engine-binary hint. Returns True/False,
+    or None when the script is not readable / not a wrapper."""
+    toks = cmd.split()
+    if len(toks) < 2:
+        return None
+    script = toks[1]
+    path = os.path.expanduser(script)
+    try:
+        if not os.path.isfile(path) or not os.access(path, os.R_OK):
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            head = f.read(16384)
+        if not head.startswith("#!"):
+            return None
+    except OSError:
+        return None
+    if _UNIT_ENGINE_HINT.search(head):
+        return True
+    if "python" in head.lower() and any(x in head.lower() for x in ("vllm", "sglang", "llama")):
+        return True
+    return False
+
+
 def _cmd_is_inference(cmd):
     """Heuristic: does this ExecStart command look like an LLM engine?"""
     if not cmd:
@@ -630,6 +656,9 @@ def _cmd_is_inference(cmd):
     # python -m vllm / sglang / llama stack
     if "python" in cmd.lower() and any(x in cmd.lower() for x in ("vllm", "sglang", "llama")):
         return True
+    hint = _launcher_script_hint(cmd)
+    if hint is not None:
+        return hint
     return False
 
 

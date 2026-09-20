@@ -421,163 +421,24 @@ def _hist_delta(prev_h, cur_h):
     return {"buckets": out, "sum": ds, "count": dc}
 
 
-# Trailing window for the vLLM measured per-seat rate (see
-# _vllm_measured_seat_rate). Must span several request completions.
-VLLM_SLOT_RATE_WINDOW_S = 20
-
-
-def _vllm_measured_seat_rate(st):
-    """Measured per-request decode rate (tok/s) for a vLLM lane, from the
-    per-request histograms vLLM samples at request completion.
-
-    vLLM exposes no /slots identity — every /metrics series is engine-level
-    (the only labels are {engine, model_name}), so there is no per-seat signal
-    to read the way llama.cpp's /slots gives one. But the request histograms
-    DO carry per-request data: each completed request contributes one
-    observation to vllm:request_generation_tokens (its output length) and to
-    vllm:request_decode_time_seconds (its decode wall time). Over a trailing
-    window, Δ(gen sum) ÷ Δ(decode sum) is a MEASURED tokens-per-second over the
-    requests that finished in that window — the honest "what one request's
-    speed actually was" figure, distinct from the aggregate ÷ running estimate
-    the UI otherwise shows. The inter-token-latency histogram is NOT used: with
-    MTP speculative decoding it is sampled per decode step, not per emitted
-    token, so 1/ITL under-reads the real token rate.
-
-    The ratio is taken across a VLLM_SLOT_RATE_WINDOW_S trailing window, NOT
-    the last two poll samples: vLLM advances these counters only when a request
-    COMPLETES, so a single ~2s tick usually has zero completions even while the
-    engine is generating at full tilt — a last-two-tick diff would report None
-    (dropping the seat to the estimate) for most ticks under load and make the
-    card strobe. Averaging over ~20s catches several completions, so the rate
-    is stable and stays lit through sustained decode, yet the window is short
-    enough that a genuine speed change still surfaces within a few seconds.
-
-    The request_* histograms are emitted only by a real vLLM engine — the
-    sglang/llama/ds4 alias shims never fabricate them — so their presence is
-    itself the proof that this lane is vLLM; no separate backend gate needed.
-
-    Returns (tok_s, n_completed_in_window) or (None, 0) when there is nothing
-    honest to measure: no samples, a too-short window, an engine restart (a
-    negative delta makes _hist_delta return None), or zero requests completed
-    across the whole window (a genuinely quiet lane — fall back to the estimate
-    rather stamp a stale rate).
-    """
-    smp = st.get("samples") if st else None
-    if not smp or len(smp) < 2:
-        return None, 0
-    last_ts, cur = smp[-1][0], smp[-1][1]
-    cutoff = last_ts - VLLM_SLOT_RATE_WINDOW_S
-    # Oldest sample still inside the trailing window = window start point.
-    first_ts, prev = None, None
-    for ts, parsed in smp:
-        if ts >= cutoff:
-            first_ts, prev = ts, parsed
-            break
-    if first_ts is None or last_ts - first_ts < 1.0:   # window too thin to trust
-        return None, 0
-    hists_last = (cur or {}).get("histograms") or {}
-    hists_prev = (prev or {}).get("histograms") or {}
-    gen = _hist_delta(hists_prev.get("vllm:request_generation_tokens"),
-                      hists_last.get("vllm:request_generation_tokens"))
-    dec = _hist_delta(hists_prev.get("vllm:request_decode_time_seconds"),
-                      hists_last.get("vllm:request_decode_time_seconds"))
-    if not gen or not dec:
-        return None, 0
-    # A genuine measurement needs ≥1 request that both completed in the window
-    # (decode count grew) and emitted output (gen sum grew). A pure-prefill or
-    # idle lane has gen.sum 0 → nothing to divide.
-    if not dec["count"] or not dec["sum"] or not gen["sum"]:
-        return None, 0
-    rate = gen["sum"] / dec["sum"]
-    if not (0.5 < rate < 1_000_000):   # sanity band; reject resets/garbage
-        return None, 0
-    return round(rate, 1), int(dec["count"])
-
-
-# Trailing window for the live token-rate stat cards on vLLM lanes (see
-# _vllm_live_rates). Same rationale as VLLM_SLOT_RATE_WINDOW_S: vLLM records
-# token work only at request completion, so any live rate needs a window wide
-# enough to catch several completions.
-VLLM_LIVE_RATE_WINDOW_S = 20
-
-
-def _ring_window(smp, win_s):
-    """Trailing-window baseline from a scrape ring:
-    (base_ts, base_parsed, last_ts, last_parsed), or None when the ring has
-    no usable pair. The baseline is the OLDEST sample still inside the
-    window, so the span is ~win_s whenever the ring carries enough history;
-    a thin ring yields a short span and callers set their own minimum."""
-    if not smp or len(smp) < 2:
-        return None
-    last_ts, cur = smp[-1][0], smp[-1][1]
-    cutoff = last_ts - win_s
-    for ts, parsed in smp:
-        if ts >= cutoff:
-            return ts, parsed, last_ts, cur
-    return None
-
-
-def _vllm_live_rates(st):
-    """Aggregate live token rates for a vLLM lane — (out/s, in/s, total/s,
-    is_vllm) — measured from the per-request completion histograms over a
-    trailing VLLM_LIVE_RATE_WINDOW_S window. A non-vLLM lane returns
-    (None, None, None, False); a vLLM lane the method cannot honestly
-    measure yet (ring younger than the window, or nothing completed) returns
-    (None, None, None, True) so the caller renders the dash rather than a
-    completion-burst counter artifact.
-
-    WHY NOT THE COUNTERS: vLLM bumps prompt_tokens_total /
-    generation_tokens_total only when a request COMPLETES — the same
-    task-event pathology documented below for llama.cpp's /metrics
-    counters. Over the ~10s live window both deltas are therefore 0 for
-    most polls even at full tilt: the OUTPUT card froze at a stale value,
-    INPUT read 0.0 while prefill ran, and TOTAL collapsed onto OUTPUT
-    (both the same zero-delta clone). The completion histograms carry the
-    identical per-request totals WITH a time base (the ring): tokens
-    recorded in the window ÷ window span is a stable aggregate wall-clock
-    throughput, never a strobe, and prefill and decode land in the same
-    window for the same request, so the input card can't read 0 while the
-    output card reads high.
-
-    Input uses request_prefill_kv_computed_tokens — the prompt tokens the
-    engine actually computed. Cache-hit prompt tokens never cost compute,
-    so a live *rate* card shows real prefill work (the exact all-prompt
-    window value above stays counter-based).
-
-    Gate: the request_* histograms exist only on a real vLLM engine (the
-    sglang/llama/ds4 alias shims never fabricate them), so their presence
-    is the backend check — same trick as _vllm_measured_seat_rate.
-    """
-    w = _ring_window(st.get("samples") if st else None, VLLM_LIVE_RATE_WINDOW_S)
-    if not w:
-        return None, None, None, False
-    base_ts, prev, last_ts, cur = w
-    hc = (cur or {}).get("histograms") or {}
-    NAMES = ("vllm:request_generation_tokens",
-             "vllm:request_prefill_kv_computed_tokens",
-             "vllm:request_decode_time_seconds",
-             "vllm:request_prefill_time_seconds")
-    if not any(n in hc for n in NAMES):
-        return None, None, None, False               # not a vLLM engine
-    span = last_ts - base_ts
-    if span < 5.0:            # vLLM, but too little ring history to average
-        return None, None, None, True
-    hp = (prev or {}).get("histograms") or {}
-
-    def d(name):
-        return _hist_delta(hp.get(name), hc.get(name))
-
-    gen = d("vllm:request_generation_tokens")
-    pfk = d("vllm:request_prefill_kv_computed_tokens")
-    dec = d("vllm:request_decode_time_seconds")
-    pre = d("vllm:request_prefill_time_seconds")
-    if not ((dec and dec["count"]) or (pre and pre["count"])):
-        return None, None, None, True                # nothing completed: idle
-    out = round(gen["sum"] / span, 2) if gen and gen["sum"] > 0 else None
-    inp = round(pfk["sum"] / span, 2) if pfk and pfk["sum"] > 0 else None
-    tot = (round((out or 0.0) + (inp or 0.0), 2)
-           if (out is not None or inp is not None) else None)
-    return out, inp, tot, True
+def _with_vllm_aliases(parsed):
+    """Native vLLM emits kv_cache_usage_perc (and prefix_cache_hit_rate) as a
+    0-1 FRACTION — unlike the sglang alias path (x100) and the llama.cpp
+    /slots injection (0-100). Scale to the 0-100 convention every UI consumer
+    assumes, at parse time so the ring, stats, series and DB all agree.
+    Verified against the live :8000 aeon lane (2026-09-14): gauge read 0.1637
+    during a 140K-token prefill (== 140026/882158 blocks) and the UI rendered
+    "0%" from it."""
+    g = parsed.get("gauges", {})
+    if "sglang:full_token_usage" in g or "llamacpp:kv_pct" in g:
+        return parsed  # other backends already normalized at the source
+    for name in ("vllm:kv_cache_usage_perc", "vllm:prefix_cache_hit_rate"):
+        v = (g.get(name) or {}).get("value")
+        if v is not None and 0 <= v <= 1:
+            g[name] = {"value": v * 100.0, "labels": g[name].get("labels", {}),
+                       **({k: v2 for k, v2 in g[name].items()
+                           if k not in ("value", "labels")})}
+    return parsed
 
 
 def _with_llamacpp_aliases(parsed):
@@ -798,6 +659,7 @@ def scrape_engines():
                 raw = urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/metrics", timeout=1.5).read()
                 parsed = promparse.parse(raw.decode("utf-8", "replace"))
+                parsed = _with_vllm_aliases(parsed)
                 parsed = _with_llamacpp_aliases(parsed)
                 parsed = _with_sglang_aliases(parsed)
                 parsed = _with_ds4_aliases(parsed)
@@ -1001,13 +863,169 @@ def _update_slots(st):
     st["slot_tps"] = tps
 
 
+VLLM_SLOT_RATE_WINDOW_S = 20   # trailing window for the measured vLLM rate
+# Trailing window for the live token-rate stat cards on vLLM lanes (see
+# _vllm_live_rates). Same rationale: vLLM records token work only at request
+# completion, so any live rate needs a window wide enough to catch several
+# completions.
+VLLM_LIVE_RATE_WINDOW_S = 20
+
+
+def _ring_window(smp, win_s):
+    """Trailing-window baseline from a scrape ring:
+    (base_ts, base_parsed, last_ts, last_parsed), or None when the ring has
+    no usable pair. The baseline is the OLDEST sample still inside the
+    window, so the span is ~win_s whenever the ring carries enough history;
+    a thin ring yields a short span and callers set their own minimum."""
+    if not smp or len(smp) < 2:
+        return None
+    last_ts, cur = smp[-1][0], smp[-1][1]
+    cutoff = last_ts - win_s
+    for ts, parsed in smp:
+        if ts >= cutoff:
+            return ts, parsed, last_ts, cur
+    return None
+
+
+def _vllm_live_rates(st):
+    """Aggregate live token rates for a vLLM lane — (out/s, in/s, total/s,
+    is_vllm) — measured from the per-request completion histograms over a
+    trailing VLLM_LIVE_RATE_WINDOW_S window. A non-vLLM lane returns
+    (None, None, None, False); a vLLM lane the method cannot honestly
+    measure yet (ring younger than the window, or nothing completed) returns
+    (None, None, None, True) so the caller renders the dash rather than a
+    completion-burst counter artifact.
+
+    WHY NOT THE COUNTERS: vLLM bumps prompt_tokens_total /
+    generation_tokens_total only when a request COMPLETES — the same
+    task-event pathology documented below for llama.cpp's /metrics
+    counters. Over the ~10s live window both deltas are therefore 0 for
+    most polls even at full tilt: the OUTPUT card froze at a stale value,
+    INPUT read 0.0 while prefill ran, and TOTAL collapsed onto OUTPUT
+    (both the same zero-delta clone). The completion histograms carry the
+    identical per-request totals WITH a time base (the ring): tokens
+    recorded in the window ÷ window span is a stable aggregate wall-clock
+    throughput, never a strobe, and prefill and decode land in the same
+    window for the same request, so the input card can't read 0 while the
+    output card reads high.
+
+    Input uses request_prefill_kv_computed_tokens — the prompt tokens the
+    engine actually computed. Cache-hit prompt tokens never cost compute,
+    so a live *rate* card shows real prefill work (the exact all-prompt
+    window value above stays counter-based).
+
+    Gate: the request_* histograms exist only on a real vLLM engine (the
+    sglang/llama/ds4 alias shims never fabricate them), so their presence
+    is the backend check — same trick as _vllm_measured_seat_rate.
+    """
+    w = _ring_window(st.get("samples") if st else None, VLLM_LIVE_RATE_WINDOW_S)
+    if not w:
+        # ring too thin for any judgement; treat as non-vllm only if the
+        # newest sample can't say — checked below on the normal path
+        return None, None, None, False
+    base_ts, prev, last_ts, cur = w
+    hc = (cur or {}).get("histograms") or {}
+    NAMES = ("vllm:request_generation_tokens",
+             "vllm:request_prefill_kv_computed_tokens",
+             "vllm:request_decode_time_seconds",
+             "vllm:request_prefill_time_seconds")
+    if not any(n in hc for n in NAMES):
+        return None, None, None, False               # not a vLLM engine
+    span = last_ts - base_ts
+    if span < 5.0:            # vLLM, but too little ring history to average
+        return None, None, None, True
+    hp = (prev or {}).get("histograms") or {}
+
+    def d(name):
+        return _hist_delta(hp.get(name), hc.get(name))
+
+    gen = d("vllm:request_generation_tokens")
+    pfk = d("vllm:request_prefill_kv_computed_tokens")
+    dec = d("vllm:request_decode_time_seconds")
+    pre = d("vllm:request_prefill_time_seconds")
+    if not ((dec and dec["count"]) or (pre and pre["count"])):
+        return None, None, None, True                # nothing completed: idle
+    out = round(gen["sum"] / span, 2) if gen and gen["sum"] > 0 else None
+    inp = round(pfk["sum"] / span, 2) if pfk and pfk["sum"] > 0 else None
+    tot = (round((out or 0.0) + (inp or 0.0), 2)
+           if (out is not None or inp is not None) else None)
+    return out, inp, tot, True
+
+
+def _vllm_measured_seat_rate(st):
+    """Measured per-request decode rate (tok/s) for a vLLM lane, from the
+    per-request histograms vLLM samples at request completion.
+
+    vLLM exposes no /slots identity — every /metrics series is engine-level
+    (the only labels are {engine, model_name}), so there is no per-seat signal
+    to read the way llama.cpp's /slots gives one. But the request histograms
+    DO carry per-request data: each completed request contributes one
+    observation to vllm:request_generation_tokens (its output length) and to
+    vllm:request_decode_time_seconds (its decode wall time). Over a trailing
+    window, Δ(gen sum) ÷ Δ(decode sum) is a MEASURED tokens-per-second over the
+    requests that finished in that window — the honest "what one request's
+    speed actually was" figure, distinct from the aggregate ÷ running estimate
+    the UI otherwise shows. The inter-token-latency histogram is NOT used: with
+    MTP speculative decoding it is sampled per decode step, not per emitted
+    token, so 1/ITL under-reads the real token rate.
+
+    The ratio is taken across a VLLM_SLOT_RATE_WINDOW_S trailing window, NOT
+    the last two poll samples: vLLM advances these counters only when a request
+    COMPLETES, so a single ~2s tick usually has zero completions even while the
+    engine is generating at full tilt — a last-two-tick diff would report None
+    (dropping the seat to the estimate) for most ticks under load and make the
+    card strobe. Averaging over ~20s catches several completions, so the rate is
+    stable and stays lit through sustained decode, yet the window is short
+    enough that a genuine speed change still surfaces within a few seconds.
+
+    The request_* histograms are emitted only by a real vLLM engine — the
+    sglang/llama/ds4 alias shims never fabricate them — so their presence is
+    itself the proof that this lane is vLLM; no separate backend gate needed.
+
+    Returns (tok_s, n_completed_in_window) or (None, 0) when there is nothing
+    honest to measure: no samples, a too-short window, an engine restart (a
+    negative delta makes _hist_delta return None), or zero requests completed
+    across the whole window (a genuinely quiet lane — fall back to the estimate
+    rather stamp a stale rate).
+    """
+    smp = st.get("samples") if st else None
+    if not smp or len(smp) < 2:
+        return None, 0
+    last_ts, cur = smp[-1][0], smp[-1][1]
+    cutoff = last_ts - VLLM_SLOT_RATE_WINDOW_S
+    # Oldest sample still inside the trailing window = window start point.
+    first_ts, prev = None, None
+    for ts, parsed in smp:
+        if ts >= cutoff:
+            first_ts, prev = ts, parsed
+            break
+    if first_ts is None or last_ts - first_ts < 1.0:   # window too thin to trust
+        return None, 0
+    hists_last = (cur or {}).get("histograms") or {}
+    hists_prev = (prev or {}).get("histograms") or {}
+    gen = _hist_delta(hists_prev.get("vllm:request_generation_tokens"),
+                      hists_last.get("vllm:request_generation_tokens"))
+    dec = _hist_delta(hists_prev.get("vllm:request_decode_time_seconds"),
+                      hists_last.get("vllm:request_decode_time_seconds"))
+    if not gen or not dec:
+        return None, 0
+    # A genuine measurement needs ≥1 request that both completed in the window
+    # (decode count grew) and emitted output (gen sum grew). A pure-prefill or
+    # idle lane has gen.sum 0 → nothing to divide.
+    if not dec["count"] or not dec["sum"] or not gen["sum"]:
+        return None, 0
+    rate = gen["sum"] / dec["sum"]
+    if not (0.5 < rate < 1_000_000):   # sanity band; reject resets/garbage
+        return None, 0
+    return round(rate, 1), int(dec["count"])
+
+
 def _live_slot_state(st):
     """Live per-slot occupancy: which seats are busy right now, how many
-    queue behind them, and each busy seat's own decode rate. `src` names
-    where that rate came from: "slot" = llama.cpp /slots per-seat measurement,
-    "req" = vLLM measured per-request rate from the completion histograms,
-    None = no measured rate (the UI renders the aggregate ÷ running
-    estimate)."""
+    queue behind them, and each busy seat's own decode rate. The rate is a
+    measurement where the backend exposes one — per-slot on llama.cpp (/slots),
+    per-request on vLLM (the completion histograms) — and None otherwise, so
+    the UI renders an aggregate÷running estimate for it."""
     if not st:
         return {}
     cap = st.get("slot_cap")
@@ -1019,19 +1037,18 @@ def _live_slot_state(st):
     seats = [True] * run + [False] * max(0, (cap or 0) - run)
     src = None
     if tps:
-        # llama.cpp: true per-seat rates from /slots deltas.
+        # llama.cpp /slots: a real per-seat decode rate (src="slot").
         rates = [round(v, 1) for v in tps.values()]
         busy = sorted(rates, reverse=True)[:run]
         while len(busy) < run:
             busy.append(None)
         src = "slot"
     else:
-        # vLLM: no per-seat identity, but the completion histograms give a
-        # measured PER-REQUEST decode rate — stamp it on the busy seats.
-        # Identical on each seat: it measures what one request's speed was,
-        # not seat-to-seat identity. Quiet lane (no completions in the
-        # window) → None → the UI estimate path stands.
         busy = [None] * run
+        # vLLM: no per-seat identity, but the request histograms give a
+        # measured per-request decode rate — stamp it on the busy seats
+        # (src="req"). Quiet lane (no completions this tick) → stay None so
+        # the UI falls back to its aggregate estimate.
         mtps, _n = _vllm_measured_seat_rate(st)
         if mtps is not None and run > 0:
             busy = [mtps] * run
@@ -2019,16 +2036,22 @@ def _unit_state_full(unit):
     return st, en
 
 
+def _proc_rss_gib(pid):
+    """RSS in GiB for a pid, or 0.0 if unreadable. /proc stat field 24 is the
+    RSS in PAGES (4 KB), not KB. comm (field 2) may contain spaces/parens, so
+    rsplit on the last ')' before splitting the rest."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parts = f.read().rsplit(")", 1)[1].split()
+        return round(int(parts[24 - 3]) * 4096 / 1073741824, 2)
+    except (OSError, IndexError, ValueError):
+        return 0.0
+
+
 def _main_pid_rss(unit):
     out = run(f"systemctl show {unit} -p MainPID --value")
     if out and out.isdigit() and int(out) > 1:
-        try:
-            with open(f"/proc/{out}/stat") as f:
-                parts = f.read().rsplit(")", 1)[1].split()
-            rss_kb = int(parts[10])  # field 24 = rss (1-indexed after comm)
-            return int(out), round(rss_kb / 1048576, 2)
-        except (OSError, IndexError, ValueError):
-            pass
+        return int(out), _proc_rss_gib(int(out))
     return None, 0.0
 
 
@@ -2159,6 +2182,13 @@ def engines_fleet():
             d = u["derived"]
             port = d["port"] or entry.get("port")
             proc = _engine_proc(port)
+            # Wrapper units (bash launch scripts) carry the unit's MainPID = the
+            # script (~2 MB), not the engine it spawns. When the unit is active
+            # and the real engine process is found on its port, surface THAT
+            # pid + RSS so the fleet's memory readout reflects the server, not
+            # the wrapper. A direct-binary unit already has the right MainPID.
+            if proc and proc.get("pid") and active == "active" and proc["pid"] != pid:
+                pid, rss_gib = proc["pid"], _proc_rss_gib(proc["pid"])
             # Launcher units (ds4-serve / docker start.sh) carry no --model on
             # ExecStart, so d["model"] is None. Resolve the real host path from
             # the live process arg or the docker bind-mount source. When the
@@ -2712,7 +2742,7 @@ def _host_model_for_unit(port, proc, derived_model, entry, binary):
     --model flag on ExecStart, so parse_unit derives nothing. The real path is
     the engine process's own --model/-m/--model-path arg, read from /proc:
       * ds4 runs on the host -> that arg is already a host path
-        (/opt/models/gguf/….gguf).
+        (/home/frank/gguf/….gguf).
       * sglang runs in a container -> that arg is a container path
         (/models/main); map it to its host bind-mount source
         (/opt/sglang_models/…/main) via the container that exposes `port`.

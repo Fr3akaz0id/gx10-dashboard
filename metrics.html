@@ -1338,9 +1338,10 @@ function initInfoTips(){
 /* ── SLOTS card: live seats + occupancy over the window (single lane) ──
    Live seats come from the live scrape ring (eng.slot_live); the over-time
    chart follows the window like every other card: ring (short windows) or
-   SQLite (>=1h). Per-seat tok/s is a MEASUREMENT on llama.cpp (/slots), an
-   estimate (aggregate ÷ running seats) where the backend exposes no
-   per-request rates — marked ≈. */
+   SQLite (>=1h). Per-seat tok/s is a MEASUREMENT where the backend exposes
+   per-request data — per-slot on llama.cpp (/slots), per-request on vLLM
+   (completion histograms) — and an estimate (aggregate ÷ running seats)
+   otherwise or on a quiet lane — marked ≈. */
 var SLOT_CH={ts:[],run:[],wait:[],tps:[],cap:null,n:0};
 var SLOT_HOVER=null;
 function _slotTimeStr(t){
@@ -1449,18 +1450,18 @@ function initSlotHover(){
 }
 function renderSlots(eng,hist,d){
   var seatsEl=$('slot-seats'),kpiEl=$('slot-kpi');
-  var cap=null,run=0,wait=0,seats=[],busy=[],est=false,rsrc=null,orate=null;
+  var cap=null,run=0,wait=0,seats=[],busy=[],est=false,orate=null,rsrc=null;
   var series=null,flips=[];
   var kpi=null;
   if(!hist&&eng&&eng.slot_live){
     var L=eng.slot_live;
-    cap=L.cap;run=L.run;wait=L.wait;seats=L.seats||[];busy=L.busy||[];
-    rsrc=L.src||null;
+    cap=L.cap;run=L.run;wait=L.wait;seats=L.seats||[];busy=L.busy||[];rsrc=L.src||null;
     series=eng.slot_series||null;
     var st=eng.stats||{};
     orate=st.output_per_s_now!=null?st.output_per_s_now:st.output_per_s;
     /* estimate: aggregate rate split over running seats when the backend
-       exposes no per-request rates (SGLang/vLLM/ds4). orate 0/null =
+       exposes no per-request rates (SGLang/ds4) or the vLLM lane was quiet
+       (no request completed in the poll window). orate 0/null =
        prefill or a quiet moment -> leave the seat '…' instead of '0'. */
     if(orate!=null&&orate>0&&run>0&&busy.length&&busy.every(function(v){return v==null;})){
       var per=Math.round(orate/run*10)/10;
