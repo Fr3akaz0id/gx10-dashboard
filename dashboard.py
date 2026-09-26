@@ -2216,7 +2216,13 @@ def engines_fleet():
                 "rss_gib": rss_gib,
                 "engine": live if live != "unknown" else sniffed,
                 "model": model_path,
-                "model_short": (model_path or "").rsplit("/", 1)[-1] if model_path else None,
+                "model_short": ((model_path or "").rsplit("/", 1)[-1]
+                                if model_path else None),
+                # host path is the best answer when it exists; container
+                # engines have none, so ask the engine (or config) what it
+                # serves instead of rendering an em-dash on every card.
+                "served_model": (None if model_path
+                                 else _served_model_name(port, entry)),
                 "port": port,
                 "host": d["host"],
                 "ctx": d["ctx"],
@@ -2733,6 +2739,28 @@ def _engine_proc(port):
     if len(_PROC_CACHE) > 32:
         _PROC_CACHE.clear()
     return found
+
+
+def _served_model_name(port, entry):
+    """What the engine says it serves, else what config declares.
+
+    _host_model_for_unit resolves a HOST PATH or nothing, so container engines
+    (vLLM/EXL3, no host GGUF) leave the card blank. Ask the live engine first
+    (GET /v1/models -> data[0].id, the same probe _port_detail uses), then fall
+    back to a declared config 'model' so a stopped lane still shows its model.
+    Returns a repo/model id, NOT a path - callers must not present it as one.
+    """
+    if port:
+        try:
+            req = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/v1/models", timeout=1.5)
+            data = json.load(req)
+            dd = data.get("data", [])
+            if dd and dd[0].get("id"):
+                return dd[0]["id"]
+        except Exception:
+            pass
+    return entry.get("model") or None
 
 
 def _host_model_for_unit(port, proc, derived_model, entry, binary):

@@ -495,7 +495,7 @@ function loadFleet(){
         }else if(act)memTxt='in GPU pool';
         else if(e.kind==='docker'&&/Exited|Dead/i.test(e.status||''))memTxt='down';
         var sub=e.kind==='unit'
-          ?(e.model_short?('model '+e.model_short+(e.ctx?' · ctx '+e.ctx:'')):(e.engine||''))
+          ?((e.model_short||e.served_model)?('model '+(e.model_short||e.served_model)+(e.ctx?' · ctx '+e.ctx:'')):(e.engine||''))
           :((e.image||''));
         var div=document.createElement('div');
         div.className='brow'+(act?'':' off');
@@ -560,7 +560,7 @@ function loadFleet(){
         +'<div class="fcard-tags">'
         +'<span class="type '+be+'">'+esc(typeTxt)+'</span>'
         +'<span class="st '+st+'">'+esc(e.active)+'</span></div></div>'
-        +'<div class="mdl" title="'+esc(e.model||'')+'">'+esc(e.model||e.model_short||'—')+'</div>'
+        +'<div class="mdl" title="'+esc(e.model||e.served_model||e.model_short||'')+'">'+esc(e.model_short||e.served_model||e.model||'—')+'</div>'
         +slotHtml
         +'<div class="sub">'+sub+'</div>';
       c.addEventListener('click',function(){openDetail(e);});
