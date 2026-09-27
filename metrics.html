@@ -395,14 +395,10 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     <div id="kv-abs" class="gcap" style="display:none"></div></div>
   <div class="card s24-4"><h2>PREFIX CACHE HIT % <span class="info" data-tip="cache hits / queries over the window, weighted by volume — queries_total already includes hits, so hits are not added again">i</span></h2>
     <div class="gwrap"><div id="g-ph-slot"></div></div></div>
-  <div class="card s24-8"><h2>TIME TO FIRST TOKEN P50 / P95 / P99 <span class="info" data-tip="per-request latency to the first token. vLLM: histogram percentiles per tick. llama.cpp: instantaneous prompt-seconds gauge (p50=p95=p99).">i</span></h2>
-    <div class="tsbox"><canvas id="c-ttft"></canvas><div id="lg-ttft"></div></div></div>
-  <div class="card s24-8"><h2>PREEMPTIONS / MIN <span class="info" data-tip="requests thrown out of the KV cache by the scheduler and redone, per minute. The direct symptom of KV pressure: sustained non-zero means --max-num-seqs or the cache budget is too small for the traffic. Normally flat at zero — any visible bar is worth a look.">i</span></h2>
-    <div class="tsbox"><canvas id="c-preempt"></canvas><div id="lg-preempt"></div></div></div>
-  <div class="card s24-8"><h2>DECODE RATE / END-TO-END LATENCY <span class="info" data-tip="TPOT (time per output token) is the gap BETWEEN tokens once generation has started — it is what makes a response feel fast or sluggish, and is independent of how long the first token took. e2e is the full request wall time. Both from vLLM histograms per tick; absent on backends that publish neither.">i</span></h2>
-    <div class="tsbox"><canvas id="c-tpot"></canvas><div id="lg-tpot"></div></div></div>
-  <div class="card s24-8"><h2>REQUEST HOPPER: RUNNING / WAITING / SWAPPED <span class="info" data-tip="continuous-batching scheduler: requests running vs waiting in the queue (gauges). Swapped not exposed.">i</span></h2>
-    <div class="tsbox"><canvas id="c-hop"></canvas><div id="lg-hop"></div></div></div>
+  <div class="card s24-8"><h2>REQUEST LATENCY: TTFT / DECODE / END-TO-END <span class="info" data-tip="One question, three phases. TTFT is the wait to the FIRST token. TPOT is the gap BETWEEN tokens once decoding has started — that is what makes a response feel fast or sluggish, and it is what a single stream actually experiences (1/tpot = single-stream tok/s, shown below). e2e is the full request wall time. All three are seconds and all come from the same vLLM histograms, so they belong on one axis; a fast TTFT with a slow TPOT is a very different lane from the reverse, and you cannot see that when they are on separate cards.">i</span></h2>
+    <div class="tsbox"><canvas id="c-lat"></canvas><div id="lg-lat"></div></div></div>
+  <div class="card s24-8"><h2>SCHEDULER PRESSURE: RUNNING / WAITING / PREEMPTIONS <span class="info" data-tip="Whether the scheduler is coping. running vs waiting is continuous batching; preemptions/min is the scheduler throwing a request out of the KV cache and redoing it — the direct symptom of KV pressure, i.e. --max-num-seqs or the cache budget being too small for the traffic. Preemption is normally flat at zero, so it is read as a value rather than a chart: a non-zero figure turns the badge red. A lane at 4/4 running AND preempting is telling you one story, which is why these are on one card.">i</span></h2>
+    <div class="tsbox"><canvas id="c-sched"></canvas><div id="lg-sched"></div><div id="preempt-badge" style="display:none"></div></div></div>
 </div>
 
 <!-- row 3 — host + spec + output tps -->
@@ -1017,97 +1013,100 @@ function renderPanels(eng,hist,d){
   }else{$('kv-abs').style.display='none';}
   var ph=hist?K.ph:s.prefix_hit_rate;
   setArc('g-ph',ph,'ok',ph==null?'–':Number(ph).toFixed(1)+'%',ph==null?'no traffic':'hits / queries');
-  /* ttft chart */
-  var ttRows=null;
-  if(K.ttft50.length&&K.ttft50.some(function(v){return v!=null;})){
-    var lines=[];
-    if(!hist){
-      lines=[{d:K.ttft50,c:GREEN,n:'p50'},{d:K.ttft95,c:ORANGE,n:'p95'},{d:K.ttft99,c:RED,n:'p99'}];
-    }else{
-      /* History: rows written before the ttft_p99 migration are all-null
-         there (include only if it has data). llama.cpp stores ONE
-         instantaneous mean in all three columns — collapse identical
-         series so we don't draw three overlapping "percentiles". */
-      lines=[{d:K.ttft50,c:GREEN,n:'p50'}];
-      var hasData=function(d){return d.some(function(v){return v!=null;});};
-      var same=function(a,b){return a.length===b.length&&a.every(function(v,i){
-        return v==null?b[i]==null:v===b[i];});};
-      if(hasData(K.ttft95)&&!same(K.ttft95,K.ttft50))
-        lines.push({d:K.ttft95,c:ORANGE,n:'p95'});
-      if(hasData(K.ttft99)&&!same(K.ttft99,K.ttft50)&&!same(K.ttft99,K.ttft95))
-        lines.push({d:K.ttft99,c:RED,n:'p99'});
-      if(lines.length===1){lines[0].n='ttft';lines[0].c=ORANGE;}
-    }
-    draw($('c-ttft'),lines.map(function(l){return {data:l.d};}),{min:0,colors:lines.map(function(l){return l.c;})});
-    ttRows=lines.map(function(l){return legendRow(l.n,l.c,l.d,fmtSec);});
-  }else if(K.ttftInst&&K.ttftInst.length&&K.ttftInst.some(function(v){return v!=null;})){
-    draw($('c-ttft'),[{data:K.ttftInst}],{min:0,colors:[ORANGE]});
-    ttRows=[legendRow('ttft (inst)',ORANGE,K.ttftInst,fmtSec)];
-  }else{
-    var cvT=$('c-ttft');cvT.width=cvT.height=0;
-  }
-  setLegend('lg-ttft',ttRows);
-  /* TPOT + e2e. tpot95 and e2e95 are not null on the live path (they arrive as
-     scalars, not arrays) so they need normalising into a series before draw().
-     The two are different magnitudes — TPOT is tens of ms, e2e is seconds — so
-     they share a card but each keeps its own axis via the legend rows rather
-     than being plotted on one misleading scale. */
-  var tpRows=null;
+  /* ── REQUEST LATENCY: ttft + tpot + e2e on one card ──────────────
+     Three phases of the same question, all in seconds, all from the same
+     vLLM histograms, so they share one axis honestly. A lane with a fast
+     TTFT and a slow TPOT is the opposite problem to a slow TTFT and a fast
+     TPOT, and on separate cards that comparison is impossible.
+     TPOT is ~1-2 orders of magnitude below TTFT, so plotting all of them
+     together would flatten the TPOT trace to a straight line at the
+     bottom. The chart therefore carries the TTFT percentiles and TPOT
+     together, and e2e is reported in the legend only (it is the sum of
+     the two plus prompt processing, so it tracks TTFT's shape). */
+  var latRows=null;
   var toArr=function(v){return v==null?[]:(Array.isArray(v)?v:[v]);};
+  var hasAny=function(a){return !!(a&&a.length&&a.some(function(v){return v!=null;}));};
+  var same=function(a,b){return a.length===b.length&&a.every(function(v,i){
+    return v==null?b[i]==null:v===b[i];});};
+  var l50=toArr(K.ttft50),l95=toArr(K.ttft95),l99=toArr(K.ttft99);
   var t50=toArr(K.tpot50),t95=toArr(K.tpot95),e95=toArr(K.e2e95);
-  var hasAny=function(a){return a.length&&a.some(function(v){return v!=null;});};
-  if(hasAny(t50)||hasAny(t95)||hasAny(e95)){
-    var tl=[];
-    if(hasAny(t50)) tl.push({d:t50,c:GREEN,n:'tpot p50'});
-    if(hasAny(t95)) tl.push({d:t95,c:ORANGE,n:'tpot p95'});
-    draw($('c-tpot'),tl.map(function(l){return {data:l.d};}),
-         {min:0,colors:tl.map(function(l){return l.c;})});
-    tpRows=tl.map(function(l){return legendRow(l.n,l.c,l.d,fmtSec);});
-    if(hasAny(e95)){
-      /* e2e in its own block under the chart, not on the same axis: it is
-         typically 10-60x TPOT and would flatten the TPOT trace to a line. */
-      tpRows.push(legendRow('e2e p95',BLUE,e95,fmtSec));
-    }
-    /* The headline a human cares about: how fast one stream actually streams.
-       1/tpot is tok/s for a single request regardless of how many run
-       concurrently, so it is comparable across lanes with different slot
-       counts. */
-    var t50v=lastOf(t50);
-    if(t50v!=null&&t50v>0){
-      tpRows.push({name:'single-stream',color:DIM,last:1/t50v,
-                   mean:null,mx:null,fmt:fmtTps1});
-    }
-  }else{
-    var cvP=$('c-tpot');cvP.width=cvP.height=0;
+  var latLines=[];
+  if(hasAny(l50)){
+    latLines.push({d:l50,c:GREEN,n:'ttft p50'});
+    if(hasAny(l95)&&!same(l95,l50)) latLines.push({d:l95,c:ORANGE,n:'ttft p95'});
+    if(hasAny(l99)&&!same(l99,l50)&&!same(l99,l95)) latLines.push({d:l99,c:RED,n:'ttft p99'});
+  }else if(K.ttftInst&&hasAny(K.ttftInst)){
+    latLines=[{d:K.ttftInst,c:ORANGE,n:'ttft (inst)'}];
   }
-  setLegend('lg-tpot',tpRows);
-  /* preemptions */
-  var pmRows=null;
-  var pArr=K.preempt||[];
-  if(pArr.length&&pArr.some(function(v){return v!=null;})){
-    var pMax=Math.max(1,maxOf(pArr)||0);
-    draw($('c-preempt'),[{data:pArr}],{min:0,max:pMax*1.2,colors:[RED],fill:false});
-    pmRows=[legendRow('preemptions/min',RED,pArr,function(v){
-      return v==null?'–':(Number(v)===0?'0':Number(v).toFixed(2));})];
-  }else{
-    var cvR=$('c-preempt');cvR.width=cvR.height=0;
-    pmRows=[{name:'preemptions/min',color:RED,last:0,mean:0,mx:0,
-             fmt:function(v){return v==null?'–':'0';}}];
+  if(hasAny(t50)&&latLines.length){
+    /* Scale the TTOT band to the same axis honestly by keeping it in the
+       same units (seconds) — it is simply a much smaller value, which the
+       legend reports precisely rather than the chart exaggerating. */
+    latLines.push({d:t50,c:BLUE,n:'tpot p50'});
+    if(hasAny(t95)&&!same(t95,t50)) latLines.push({d:t95,c:GOLD,n:'tpot p95'});
   }
-  setLegend('lg-preempt',pmRows);
-  /* hopper */
+  if(latLines.length){
+    draw($('c-lat'),latLines.map(function(l){return {data:l.d};}),
+         {min:0,colors:latLines.map(function(l){return l.c;})});
+    latRows=latLines.map(function(l){return legendRow(l.n,l.c,l.d,fmtSec);});
+  }else{
+    var cvL=$('c-lat');cvL.width=cvL.height=0;
+  }
+  /* e2e in the legend, not on the axis: it is typically 10-60x TPOT and
+     would compress every other series into the baseline. */
+  if(hasAny(e95)) latRows=(latRows||[]).concat([legendRow('e2e p95',DIM,e95,fmtSec)]);
+  /* The headline a human cares about: how fast ONE stream actually streams.
+     1/tpot is tok/s for a single request regardless of how many run
+     concurrently, so it is comparable across lanes with different slot
+     counts — the aggregate tps tile is not. */
+  var t50v=lastOf(t50);
+  if(t50v!=null&&t50v>0){
+    latRows=(latRows||[]).concat([{name:'single-stream',color:DIM,last:1/t50v,
+                                   mean:null,mx:null,fmt:fmtTps1}]);
+  }
+  setLegend('lg-lat',latRows);
+  /* ── SCHEDULER PRESSURE: running/waiting chart + preemptions badge ──
+     Preemption is a single scalar that is almost always zero, so a chart
+     of it is 100% dead pixels 99% of the time. It is read as a value that
+     turns red when non-zero, sitting under the occupancy chart it
+     explains. */
+  var schRows=null;
   if(K.run&&K.run.length){
-    var hmx=Math.max(1,maxOf(K.run)||0,maxOf(K.wait)||0);
-    draw($('c-hop'),[{data:K.run},{data:K.wait}],{min:0,max:hmx*1.15,colors:[GREEN,GOLD],fill:false});
-    setLegend('lg-hop',[
-      legendRow('running',GREEN,K.run,function(v){return Math.round(v);}),
-      legendRow('waiting',GOLD,K.wait,function(v){return Math.round(v);})
-    ]);
+    var smx=Math.max(1,maxOf(K.run)||0,maxOf(K.wait)||0);
+    draw($('c-sched'),[{data:K.run},{data:K.wait}],
+         {min:0,max:smx*1.15,colors:[GREEN,GOLD],fill:false});
+    /* Integer counts: legendRow's default formatter is the identity, so a
+       fractional mean (occupancy is sampled, so running averages 0.19)
+       rendered as 0.18691588785046728. */
+    var cnt=function(v){return v==null?'–':String(Math.round(v));};
+    schRows=[legendRow('running',GREEN,K.run,cnt),legendRow('waiting',GOLD,K.wait,cnt)];
   }else{
-    $('c-hop').width=$('c-hop').height=0;
-    setInner('lg-hop','<div class="tmute" style="font-size:10px;padding:4px 2px">no running/waiting samples in window</div>');
+    var cvS=$('c-sched');cvS.width=cvS.height=0;
   }
-  /* row 3 — host + spec + output tps */
+  var pArr=K.preempt||[];
+  var pLast=lastOf(pArr);
+  var pBad=pLast!=null&&pLast>0;
+  schRows=(schRows||[]).concat([{
+    name:'preemptions/min',color:pBad?RED:DIM,
+    last:pLast==null?0:pLast,
+    /* mean/max over the window too, so a single spike is visible as a shape
+       rather than only a last-value — but computed from the series, not left
+       blank. Rounded to 2dp: a rate of 0.004/min is still "0.00". */
+    mean:hasAny(pArr)?mean(pArr):null,mx:maxOf(pArr),
+    fmt:function(v){return v==null?'–':(Number(v)===0?'0':Number(v).toFixed(2));}}]);
+  setLegend('lg-sched',schRows);
+  var pb=$('preempt-badge');
+  if(pb){
+    if(pBad){
+      pb.style.display='';
+      pb.textContent='⚠ preempting — KV pressure';
+      pb.style.cssText='margin-top:7px;padding:4px 8px;border-radius:8px;font:11px/1.3 var(--font-data);'
+        +'color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 50%,transparent)';
+    }else{
+      pb.style.display='none';
+    }
+  }
+    /* row 3 — host + spec + output tps */
   var h=d.host||{};
   if(hist||!h.mem){
     setArc('g-mema',null,'warn-high');setArc('g-memb',null,'warn-high');

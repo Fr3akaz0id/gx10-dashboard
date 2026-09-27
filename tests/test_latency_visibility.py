@@ -109,7 +109,10 @@ class TestFrontendRendersThem(unittest.TestCase):
             self.h = fh.read()
 
     def test_cards_exist(self):
-        for cid in ("c-tpot", "lg-tpot", "c-preempt", "lg-preempt"):
+        # After the layout merge: TTFT+TPOT+e2e share c-lat/lg-lat, and
+        # running/waiting/preemptions share c-sched/lg-sched.
+        for cid in ("c-lat", "lg-lat", "c-sched", "lg-sched",
+                    "preempt-badge"):
             self.assertIn('id="%s"' % cid, self.h,
                           "%s missing from metrics.html" % cid)
 
@@ -122,13 +125,15 @@ class TestFrontendRendersThem(unittest.TestCase):
         # Canvases are fetched as $('c-x'); legends are written through
         # setLegend('lg-x', rows). Both must be referenced, otherwise the
         # element exists in the DOM but stays empty.
-        for cid in ("c-tpot", "c-preempt"):
+        for cid in ("c-lat", "c-sched"):
             self.assertIn("$('%s')" % cid, js,
                           "%s canvas is never drawn to — it would render "
                           "blank" % cid)
-        for lid in ("lg-tpot", "lg-preempt"):
+        for lid in ("lg-lat", "lg-sched"):
             self.assertIn("setLegend('%s'" % lid, js,
                           "%s is never populated by the render path" % lid)
+        self.assertIn("$('preempt-badge')", js,
+                      "the preemption badge is declared but never toggled")
 
     def test_series_keys_exist_for_tpot_e2e_preempt(self):
         sk = re.search(r"function seriesKeys\(.*?return \{(.*?)\n  \};",
