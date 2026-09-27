@@ -154,7 +154,7 @@ let step=0, probe=null, sel={roots:[],engines:{}};
 
 async function api(path,body){
   const r=await fetch(path,Object.assign({method:"POST",
-    headers:{"Content-Type":"application/json"}},
+    headers:{"Content-Type":"application/json","X-Dashboard-Token":"gx10-local-write"}},
     body?{body:JSON.stringify(body)}:{}));
   const j=await r.json();
   if(!r.ok) throw new Error(j.error||("HTTP "+r.status));

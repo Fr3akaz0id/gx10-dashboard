@@ -397,7 +397,7 @@ function api(path){
   return fetch(path).then(function(r){return r.json();}).catch(function(e){return {error:String(e)};});
 }
 function apiPost(path,obj){
-  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj||{})})
+  return fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':'gx10-local-write'},body:JSON.stringify(obj||{})})
     .then(function(r){return r.json();});
 }
 function toast(msg,bad){

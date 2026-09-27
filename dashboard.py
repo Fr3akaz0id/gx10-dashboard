@@ -45,6 +45,34 @@ import metadb
 HOST = "0.0.0.0"
 PORT = 9000
 MAX_BODY = 4 * 1024 * 1024   # 4 MiB; every route here sends small JSON
+
+# The dashboard listens on 0.0.0.0 so any host on the LAN can VIEW it, but
+# every state-changing route is refused unless the request comes from
+# loopback. Two independent checks, because either alone is bypassable:
+#
+#   1. client address is loopback -- stops a machine on the LAN.
+#   2. an X-Dashboard-Token header matches -- stops CROSS-SITE requests.
+#      A browser can be made to POST to 127.0.0.1 by any page you visit, and
+#      in that case the connection genuinely IS from loopback, so check (1)
+#      alone would wave it through. Requiring a custom header makes the
+#      request non-simple, so the browser sends a CORS preflight first; with
+#      an empty allowed-origin set the preflight fails and the browser never
+#      delivers the request.
+#
+# The token is a fixed local constant, not a secret: its job is to be
+# UNPREDICTABLE to a remote web page, not to authenticate a user. It lives
+# in the served JS by necessity (the browser has to send it), and someone
+# who can read the page already has it -- and already has read access, which
+# is exactly the intent here.
+_WEB_WRITE_TOKEN = "gx10-local-write"
+_LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+def _is_loopback(addr):
+    try:
+        return addr in _LOOPBACK
+    except Exception:
+        return False
 POLL_S = 2.0
 HISTORY_LEN = 240  # ~8 min at 2s
 
@@ -4080,6 +4108,16 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        # Writes are loopback-only AND must carry the local token. Reads stay
+        # open to the LAN on purpose -- see _WEB_WRITE_TOKEN above.
+        if not _is_loopback(self.client_address[0]):
+            self._json({"error": "state-changing requests are only accepted "
+                                 "from localhost; this dashboard is read-only "
+                                 "over the network"}, 403)
+            return
+        if self.headers.get("X-Dashboard-Token") != _WEB_WRITE_TOKEN:
+            self._json({"error": "missing or wrong X-Dashboard-Token"}, 403)
+            return
         body = self._read_body()
         if body is None:
             self._json({"error": "bad json body"}, 400)

@@ -1728,7 +1728,7 @@ function modelDelModal(model, mkey){
   ov.querySelector('#mdel-no').addEventListener('click',close);
   ov.querySelector('#mdel-yes').addEventListener('click',function(){
     close();
-    fetch('/api/data/reset',{method:'POST',headers:{'Content-Type':'application/json'},
+    fetch('/api/data/reset',{method:'POST',headers:{'Content-Type':'application/json','X-Dashboard-Token':'gx10-local-write'},
       body:JSON.stringify({action:'model',key:mkey||model})})
       .then(function(r){return r.json();})
       .then(function(r){
