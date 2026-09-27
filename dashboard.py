@@ -1309,32 +1309,50 @@ def _window_stats(st, window_s):
                 res["input_per_s_now"] = round(r_prm / r_dt, 2)
                 res["tokens_per_s_now"] = round((r_dec + r_prm) / r_dt, 2)
             else:
-                # vLLM/sglang path. On vLLM the completion-time counters make
-                # a ~10s counter delta zero for most polls (see
-                # _vllm_live_rates), which froze the cards at stale values and
-                # rendered "0 · 0" mid-decode — so use the measured
-                # completion-histogram rates, and for a vLLM lane NEVER fall
-                # back to those burst-prone counters: an unmeasurable vLLM lane
-                # (quiet, or a ring younger than the window right after
-                # restart) renders the honest dash instead of a 0/stale clone.
-                # The counter delta stays only for backends that have no
-                # request_* histograms at all (sglang).
-                h_out, h_in, h_tot, is_vllm = _vllm_live_rates(st)
-                if h_out is not None or h_in is not None:
-                    res["output_per_s_now"] = h_out
-                    res["input_per_s_now"] = h_in
-                    res["tokens_per_s_now"] = h_tot
-                elif not is_vllm:
-                    d_out_now = _delta(_c(recent[0][1], "vllm:generation_tokens_total"),
-                                       _c(recent[-1][1], "vllm:generation_tokens_total"))
-                    d_in_now = _delta(_c(recent[0][1], "vllm:prompt_tokens_total"),
-                                      _c(recent[-1][1], "vllm:prompt_tokens_total"))
-                    if d_out_now is not None:
-                        res["output_per_s_now"] = round(d_out_now / r_dt, 2)
-                    if d_in_now is not None:
-                        res["input_per_s_now"] = round(d_in_now / r_dt, 2)
-                    if d_out_now is not None and d_in_now is not None:
-                        res["tokens_per_s_now"] = round((d_out_now + d_in_now) / r_dt, 2)
+                # vLLM/sglang path. MEASURED 2026-09-27 on the live brain
+                # lane, against generation_tokens_total sampled every 2s
+                # through a 600-token decode:
+                #
+                #   t(s)  gen_total  Δgen  tok/s | hist_sum  Δhist
+                #    2.0       1997     87   43.3 |      1812      0
+                #    2.0       2077     80   39.9 |      1812      0
+                #    2.0       2141     64   31.9 |      1812      0
+                #    2.0       2213     72   35.9 |      1812      0
+                #    2.0       2293     80   39.8 |      1812      0
+                #    2.0       2376     83   41.3 |      1812      0
+                #    2.0       2412     36   17.9 |      2412    600
+                #
+                # The COUNTER advances every poll, mid-decode. The completion
+                # HISTOGRAM is frozen at 1812 the whole time and jumps by the
+                # full 600 only when the request ends. So the previous guard
+                # here — "on vLLM never use the counter, the completion
+                # counters make a ~10s delta zero" — was exactly backwards.
+                # It preferred the histogram rate, which is a 20s trailing
+                # average that only refreshes on completion, and the card
+                # read ~5 tok/s while the engine did 40. A 10s counter delta
+                # is not burst-prone here: it spans 5 polls and several
+                # hundred tokens.
+                #
+                # The histogram is still the right source for a DIFFERENT
+                # number: tokens ÷ decode-time per completed request, which is
+                # what _vllm_measured_seat_rate reports per seat. Keep the two
+                # apart — aggregate live rate from the counter, per-request
+                # speed from the histogram.
+                d_out_now = _delta(_c(recent[0][1], "vllm:generation_tokens_total"),
+                                   _c(recent[-1][1], "vllm:generation_tokens_total"))
+                d_in_now = _delta(_c(recent[0][1], "vllm:prompt_tokens_total"),
+                                  _c(recent[-1][1], "vllm:prompt_tokens_total"))
+                if d_out_now is not None:
+                    res["output_per_s_now"] = round(d_out_now / r_dt, 2)
+                if d_in_now is not None:
+                    res["input_per_s_now"] = round(d_in_now / r_dt, 2)
+                if d_out_now is not None and d_in_now is not None:
+                    res["tokens_per_s_now"] = round((d_out_now + d_in_now) / r_dt, 2)
+                elif d_out_now is not None:
+                    # No prompt movement (decode-only tick). Still a real
+                    # measurement of the output rate — do not discard it just
+                    # because the input half of the pair is zero.
+                    res["tokens_per_s_now"] = res["output_per_s_now"]
     # llama.cpp: the /metrics token counters only move at task events
     # (on_prediction fires on the stop path), so a first/last counter DELTA
     # as a RATE reads ~0 mid-task and spikes at completion. Rates therefore
