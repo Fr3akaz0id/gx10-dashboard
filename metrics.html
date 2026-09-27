@@ -382,8 +382,9 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
 
 <!-- row 2 — cache + latency + concurrency -->
 <div class="row r24" id="row2">
-  <div class="card s24-4"><h2>KV CACHE USED <span class="info" data-tip="fraction of the KV cache in use (vllm:kv_cache_usage_perc). llama.cpp does not expose this.">i</span></h2>
-    <div class="gwrap"><div id="g-kv-slot"></div></div></div>
+  <div class="card s24-4"><h2>KV CACHE USED <span class="info" data-tip="fraction of the KV cache in use (vllm:kv_cache_usage_perc; llama.cpp used/total from /slots). The line below is the absolute budget — the percentage alone does not say how many tokens of headroom remain.">i</span></h2>
+    <div class="gwrap"><div id="g-kv-slot"></div></div>
+    <div id="kv-abs" class="sub" style="display:none"></div></div>
   <div class="card s24-4"><h2>PREFIX CACHE HIT % <span class="info" data-tip="cache hits / (hits + queries) over the window — share of prompt tokens served from the prefix cache">i</span></h2>
     <div class="gwrap"><div id="g-ph-slot"></div></div></div>
   <div class="card s24-8"><h2>TIME TO FIRST TOKEN P50 / P95 / P99 <span class="info" data-tip="per-request latency to the first token. vLLM: histogram percentiles per tick. llama.cpp: instantaneous prompt-seconds gauge (p50=p95=p99).">i</span></h2>
@@ -602,6 +603,14 @@ function mean(arr){
   var n=0,s=0;
   for(var i=0;i<arr.length;i++){if(arr[i]!=null){s+=arr[i];n++;}}
   return n?s/n:null;
+}
+/* Newest non-null value. Used for scalars that ride along a series (the KV
+   budget is a static per-lane config, not a trend) — mean() would be
+   meaningless and the last array slot may be null. */
+function lastOf(arr){
+  if(!arr||!arr.length)return null;
+  for(var i=arr.length-1;i>=0;i--)if(arr[i]!=null)return arr[i];
+  return null;
 }
 function maxOf(arr){
   if(!arr||!arr.length)return null;
@@ -864,6 +873,8 @@ function seriesKeys(e,hist){
     inn:hist?(sr.in_tps||[]):(sr.input_per_s||[]),
     total:hist?(sr.total_tps||sumSeries(sr.in_tps||[],sr.out_tps||[])):sumSeries(sr.input_per_s||[],sr.output_per_s||[]),
     kv:hist?(sr.kv_pct||[]):(sr.kv_pct||[]),
+    kv_cap:hist?lastOf(sr.kv_capacity_tokens||[]):(sr.kv_capacity_tokens||null),
+    kv_used:hist?lastOf(sr.kv_used_tokens||[]):(sr.kv_used_tokens||null),
     ph:hist?(sr.prefix_hit_rate||[]):(sr.prefix_hit_rate||[]),
     sa:hist?(sr.spec_acceptance||[]):(sr.spec_acceptance||[]),
     ttft50:hist?(sr.ttft_p50||[]):(sr.ttft_p50||[]),
@@ -926,6 +937,19 @@ function renderPanels(eng,hist,d){
   /* kv is 0-100 (vLLM kv_cache_usage_perc; llama.cpp /slots used/total*100) */
   setArc('g-kv',kv==null?null:Math.max(0,Math.min(100,kv)),'warn-high',
     kv==null?'–':Math.round(kv)+'%',kv==null?'no kv metric':'of kv cache');
+  /* Absolute denominator. A bare percentage cannot be reasoned about: "62%"
+     does not say whether 470k or 40k tokens of headroom remain, which is the
+     number that decides whether one more 262k-context request fits. vLLM gets
+     this from cache_config_info (num_gpu_blocks x block_size); llama.cpp
+     publishes its own n_ctx on /slots, so both backends show absolute tokens
+     and the card is not vLLM-only. */
+  var kvCap=s.kv_capacity_tokens, kvUsed=s.kv_used_tokens;
+  if(hist){kvCap=K.kv_cap;kvUsed=K.kv_used;}
+  if(kvCap){
+    var usedTxt=kvUsed==null?'':(fmtTok(kvUsed)+' / ');
+    $('kv-abs').textContent=usedTxt+fmtTok(kvCap)+' tokens';
+    $('kv-abs').style.display='';
+  }else{$('kv-abs').style.display='none';}
   var ph=hist?mean(K.ph):s.prefix_hit_rate;
   setArc('g-ph',ph,'ok',ph==null?'–':Number(ph).toFixed(1)+'%',ph==null?'no traffic':'hits / queries');
   /* ttft chart */
@@ -1066,12 +1090,21 @@ function renderPanels(eng,hist,d){
         +'<span class="spt"><span class="spb" id="spb-'+p+'-'+i+'" style="width:0%"></span></span>'
         +'<span class="spv" id="spv-'+p+'-'+i+'">'+Number(sp[i].pct).toFixed(1)+'%</span></div>';
     }
-    if(renderedIn['sp-wrap-shape']!==sh){
-      renderedIn['sp-wrap-shape']=sh;
+    /* One cache key for this node, and the bar-node updates are guarded.
+       setInner() caches under 'sp-wrap'; this branch used to cache under
+       'sp-wrap-shape', so the two disagreed: setInner could rewrite the
+       node's innerHTML (replacing the spb-* children) while this branch's
+       key still matched and skipped its own rewrite — leaving
+       $('spb-...') null, and the unguarded .style threw a TypeError that
+       aborted the rest of the render cycle, blanking the page. */
+    if(renderedIn['sp-wrap']!==sh){
+      renderedIn['sp-wrap']=sh;
       $('sp-wrap').innerHTML=sh;
     }
-    for(var j=0;j<sp.length;j++)
-      $('spb-'+p+'-'+j).style.width=Math.max(1,Math.min(100,sp[j].pct))+'%';
+    for(var j=0;j<sp.length;j++){
+      var bar=$('spb-'+p+'-'+j);
+      if(bar)bar.style.width=Math.max(1,Math.min(100,sp[j].pct))+'%';
+    }
   }
 }
 
@@ -1477,6 +1510,12 @@ function renderSlots(eng,hist,d){
     }
   }else if(hist&&d&&d.series){
     series={ts:d.series.ts||[],running:d.series.running||[],waiting:d.series.waiting||[],out_tps:d.series.out_tps||[]};
+    /* Per-seat rates in history, for backends with a real seat identity
+       (llama.cpp /slots). Null on vLLM, which exposes no seat axis — the
+       history seats then render 'in flight' with no rate rather than
+       borrowing the live per-request figure, which is not the same thing as
+       a seat that was busy at this point in the window. */
+    series.seat_tps=d.series.seat_tps||null;
     var S=(d.slot)||null;
     cap=S?S.cap:null;flips=S?(S.model_flips||[]):[];
     kpi={avg:S?S.avg_concurrency:null,at:S?pct_at_cap(S):null,queued:S?S.wait_total:null,queueNow:false};
@@ -1489,7 +1528,15 @@ function renderSlots(eng,hist,d){
     for(var j2=oarr.length-1;j2>=0;j2--)if(oarr[j2]!=null){orate=oarr[j2];break;}
     seats=[];
     for(var s2=0;s2<(cap||0);s2++)seats.push(s2<run);
-    busy=[];for(var b2=0;b2<run;b2++)busy.push(null);
+    /* Real per-seat rates when the backend had them at this point in the
+       window. Aligned to the strided series, same length as running. */
+    busy=[];
+    var stp=series.seat_tps;
+    for(var b2=0;b2<run;b2++){
+      var rates=(stp&&stp[stp.length-1])||null;
+      busy.push(rates&&rates[b2]!=null?rates[b2]:null);
+    }
+    rsrc=busy.some(function(v){return v!=null;})?'slot':null;
   }
   /* ── seats ── */
   if(!eng){

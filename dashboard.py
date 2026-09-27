@@ -458,6 +458,35 @@ def _with_vllm_aliases(parsed):
             g[name] = {"value": v * 100.0, "labels": g[name].get("labels", {}),
                        **({k: v2 for k, v2 in g[name].items()
                            if k not in ("value", "labels")})}
+    # KV CAPACITY, absolute. vllm:cache_config_info is a gauge whose LABELS
+    # carry the real budget: num_gpu_blocks x block_size tokens, plus
+    # kv_cache_memory_bytes. Without it the KV card is a bare percentage with
+    # no denominator -- "62% used" does not say whether 470k or 40k tokens of
+    # headroom remain, which is the number you actually reason about when
+    # queueing 4 x 262k requests against a lane that advertises 3.99x
+    # concurrency. Publish it as a real gauge the UI can render.
+    cci = g.get("vllm:cache_config_info")
+    if cci:
+        lab = cci.get("labels") or {}
+        try:
+            blocks = int(lab.get("num_gpu_blocks") or 0)
+            bsize = int(lab.get("block_size") or 0)
+        except (TypeError, ValueError):
+            blocks = bsize = 0
+        if blocks > 0 and bsize > 0:
+            g["vllm:kv_cache_capacity_tokens"] = {
+                "value": float(blocks * bsize), "labels": {}}
+            g["vllm:kv_cache_num_blocks"] = {"value": float(blocks),
+                                             "labels": {}}
+            g["vllm:kv_cache_block_size"] = {"value": float(bsize),
+                                             "labels": {}}
+        try:
+            mem = int(lab.get("kv_cache_memory_bytes") or 0)
+        except (TypeError, ValueError):
+            mem = 0
+        if mem > 0:
+            g["vllm:kv_cache_memory_bytes"] = {"value": float(mem),
+                                               "labels": {}}
     return parsed
 
 
@@ -792,8 +821,19 @@ def _update_slots(st):
         # gauges, and llama.cpp's /metrics never emits it. The gate at the
         # call site (has_metrics) guarantees samples[-1] IS this poll's dict.
         if st["samples"]:
-            st["samples"][-1][1].setdefault("gauges", {})[
-                "vllm:kv_cache_usage_perc"] = {"value": pct, "labels": {}}
+            g = st["samples"][-1][1].setdefault("gauges", {})
+            g["vllm:kv_cache_usage_perc"] = {"value": pct, "labels": {}}
+            # Same absolute gauges vLLM publishes from cache_config_info, so
+            # the KV card renders "412k of 1.24M tokens" on BOTH backends from
+            # one code path. llama.cpp's /slots is the more direct source: each
+            # entry carries its own n_ctx, and total IS the budget.
+            g["vllm:kv_cache_capacity_tokens"] = {"value": float(total),
+                                                 "labels": {}}
+            g["vllm:kv_cache_num_blocks"] = {"value": float(n_slots),
+                                             "labels": {}}
+            g["vllm:kv_cache_block_size"] = {"value": float(total // n_slots
+                                                            if n_slots else 0),
+                                             "labels": {}}
     # --- decode rate: per-poll token positions from /slots ---
     # The /metrics counters (tokens_predicted_total, prompt_tokens_total)
     # only move at task events (on_prediction is called ONLY on the stop
@@ -881,6 +921,13 @@ def _update_slots(st):
     for k in [k for k in tr if now - tr[k][2] > 120]:
         del tr[k]
     st["slot_tps"] = tps
+    # Persist the measured per-seat rates ONTO the sample so history can show
+    # them (_seat_rate_series reads sample["seat_tps"]). Without this the seat
+    # rates exist only in this transient dict and the SLOTS chart in history
+    # shows occupancy with no rate. A fresh dict so later mutation of tps
+    # cannot rewrite history.
+    if st["samples"]:
+        st["samples"][-1][1]["seat_tps"] = dict(tps)
 
 
 VLLM_SLOT_RATE_WINDOW_S = 20   # trailing window for the measured vLLM rate
@@ -1199,6 +1246,17 @@ def _window_stats(st, window_s):
         "out_tokens": None,             # in-window output (generated) token total
         "http_2xx_per_min": None,       # api success rate
         "http_4xx_per_min": None,       # api error rate
+        # --- absolute KV budget ---
+        # kv_pct alone is a percentage with no denominator: "62%" does not say
+        # whether 470k or 40k tokens of headroom remain. These carry the real
+        # budget so the UI can render "412k of 1.24M tokens" and derive the
+        # per-request headroom that explains a lane's advertised concurrency.
+        "kv_capacity_tokens": None,    # num_gpu_blocks x block_size
+        "kv_used_tokens": None,        # capacity x kv_pct/100
+        "kv_free_tokens": None,
+        "kv_memory_bytes": None,
+        "kv_num_blocks": None,
+        "kv_block_size": None,
     }
     if not pts:
         return res
@@ -1208,6 +1266,20 @@ def _window_stats(st, window_s):
                    ("waiting", "vllm:num_requests_waiting")):
         v = _g(cur, n)
         res[key] = round(v, 4) if v is not None else None
+    # Absolute KV budget, straight off the newest sample's gauges (static
+    # config, so no differencing needed).
+    for key, n in (("kv_capacity_tokens", "vllm:kv_cache_capacity_tokens"),
+                   ("kv_memory_bytes", "vllm:kv_cache_memory_bytes"),
+                   ("kv_num_blocks", "vllm:kv_cache_num_blocks"),
+                   ("kv_block_size", "vllm:kv_cache_block_size")):
+        v = _g(cur, n)
+        res[key] = int(v) if v is not None else None
+    cap = res.get("kv_capacity_tokens")
+    pct = res.get("kv_pct")
+    if cap:
+        used = int(round(cap * (pct or 0.0) / 100.0))
+        res["kv_used_tokens"] = used
+        res["kv_free_tokens"] = max(0, cap - used)
     if len(pts) < 2:
         return res
     first, cur = pts[0][1], pts[-1][1]
@@ -1571,7 +1643,36 @@ def _engine_series(st, window_s):
         "running": out["running"],
         "waiting": out["waiting"],
         "out_tps": out["output_per_s"],
+        # PER-SEAT decode rate at each point, for the backends that expose a
+        # real per-seat identity (llama.cpp /slots). vLLM has no seat axis, so
+        # this stays null there and the UI keeps showing the per-request
+        # measured rate — see _live_slot_state's src field. Sampled at the
+        # strided points only: a seat's rate is a trailing-window measurement,
+        # so keeping the stride is honest and keeps the payload small.
+        "seat_tps": _seat_rate_series(st, idx, pts),
     }
+    return out
+
+
+def _seat_rate_series(st, idx, pts):
+    """Per-seat decode rate aligned to an ALREADY-STRIDED index set.
+
+    The live per-seat rate is recomputed in _update_slots from the previous
+    /slots poll and kept in st["slot_tps"], which is not in the sample ring.
+    Reconstructing it from the ring is impossible (a /slots delta needs the
+    prior poll), so _update_slots stores the measured rates on the sample
+    itself at scrape time and this reads them back — the only honest way to
+    have seat rates in history rather than in a transient dict.
+
+    Returns a list aligned with idx: [None | [rate, ...]] — None on a backend
+    with no seat identity, so the UI can distinguish "no such backend" from
+    "idle".
+    """
+    out = []
+    for i in idx:
+        smp = pts[i][1]
+        rates = (smp.get("seat_tps") if isinstance(smp, dict) else None)
+        out.append(list(rates) if rates else None)
     return out
 
 
@@ -1820,6 +1921,14 @@ def _to_db_row(port, st):
         "ts": int(time.time()), "port": port,
         "model": st.get("model_live") or st.get("model"),
         "kv_pct": s["kv_pct"], "running": s["running"], "waiting": s["waiting"],
+        "kv_capacity_tokens": s.get("kv_capacity_tokens"),
+        "kv_used_tokens": s.get("kv_used_tokens"),
+        "kv_memory_bytes": s.get("kv_memory_bytes"),
+        # Per-seat decode rates, so per-seat t/s is answerable in history and
+        # survives a restart. Only backends with a real seat identity
+        # (llama.cpp /slots) produce a non-empty map.
+        "seat_tps_json": (json.dumps(st.get("slot_tps") or {}, sort_keys=True)
+                          or None) if st.get("slot_tps") else None,
         "out_tps": s["output_per_s"], "in_tps": s["input_per_s"],
         "total_tps": s["tokens_per_s"], "req_per_s": s["requests_per_s"],
         "ttft_p50": s["ttft_p50"], "ttft_p95": s["ttft_p95"],
@@ -2765,14 +2874,81 @@ def _arg(args, flag):
     return None
 
 
+_DOCKER_PORT_RE = re.compile(r"\[?([0-9a-fA-F:.]*)\]?:(\d+)->(\d+)/(tcp|udp)$")
+_docker_ports_cache = (0.0, {})     # (fetch_ts, {host_port: (name, container_port)})
+
+
+def _docker_port_map():
+    """host_port -> (container_name, container_port) for published container
+    ports. Cached 10s (this shells out to docker).
+
+    Needed because a container's process cmdline reports its OWN port: docker
+    publishing 0.0.0.0:8001->8000/tcp means the vLLM process says `--port
+    8000` while the dashboard (and every client) talks to 8001. The /proc scan
+    therefore cannot see the lane at all, and worse, a DIFFERENT configured
+    lane that happens to own the container-internal port gets credited with
+    its --max-num-seqs. Both directions were observed live.
+    """
+    global _docker_ports_cache
+    ts, cached = _docker_ports_cache
+    if time.time() - ts < _PROC_CACHE_TTL and cached:
+        return cached
+    out = {}
+    try:
+        r = subprocess.run(["docker", "ps", "--format", "{{.Names}}\t{{.Ports}}"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            for line in (r.stdout or "").splitlines():
+                if "\t" not in line:
+                    continue
+                name, ports = line.split("\t", 1)
+                for part in ports.split(","):
+                    m = _DOCKER_PORT_RE.search(part.strip())
+                    if m:
+                        out.setdefault(int(m.group(2)), (name.strip(), int(m.group(3))))
+    except Exception:
+        pass
+    _docker_ports_cache = (time.time(), out)
+    return out
+
+
 def _engine_proc(port):
     """World-readable /proc/*/cmdline scan → the process bound to `port`
     (any binary; the --port flag is the key). cmdline is world-readable even
     for other-user processes, so no root is needed. Returns
-    {pid, args, base} or None. Cached 10s (the scan reads every /proc/*/cmdline)."""
+    {pid, args, base, container} or None. Cached 10s.
+
+    DOCKER: a published port is not the port the process advertises. Resolve
+    the mapping first and scan for the CONTAINER-side port instead, so a
+    Docker lane is visible to every /proc-derived feature (slot cap, RSS,
+    model/version, TTFT + spec-decode journal rows).
+
+    Deliberately does NOT scan the host port as a fallback when a mapping
+    exists: that is exactly how a dead lane on the container-internal port
+    was credited with the live container's --max-num-seqs. A host-port match
+    is only accepted when the port is not a published container port.
+    """
     hit = _PROC_CACHE.get(port)
     if hit and time.time() - hit[0] < _PROC_CACHE_TTL:
         return hit[1]
+
+    pm = _docker_port_map()
+    mapped = pm.get(int(port)) if port else None
+    if mapped:
+        want, container = str(mapped[1]), mapped[0]
+    else:
+        # Guard the OTHER direction. A port that exists only as some
+        # container's internal port has no host process of its own: matching a
+        # host-side lane to it hands a dead lane the live container's
+        # --max-num-seqs (observed: inactive ds4 on :8000 reporting cap=4 from
+        # the brain container that publishes 8001->8000). If this port is a
+        # container-internal port, there is nothing to find.
+        internal = {cp for (_n, cp) in pm.values()}
+        if port in internal:
+            _PROC_CACHE[port] = (time.time(), None)
+            return None
+        want, container = str(port), None
+
     found = None
     for d in os.listdir("/proc"):
         if not d.isdigit():
@@ -2782,9 +2958,10 @@ def _engine_proc(port):
                 args = f.read().replace(b"\0", b" ").decode("utf-8", "replace").split()
         except Exception:
             continue
-        if "--port" in args and _arg(args, "--port") == str(port):
+        if "--port" in args and _arg(args, "--port") == want:
             found = {"pid": int(d), "args": args,
-                     "base": os.path.basename(args[0] or "")}
+                     "base": os.path.basename(args[0] or ""),
+                     "container": container}
             break
     _PROC_CACHE[port] = (time.time(), found)
     if len(_PROC_CACHE) > 32:
@@ -3320,6 +3497,36 @@ def api_metrics_history(port, span_s):
                "total_tokens", "finish_per_min", "http_2xx_per_min",
                "http_4xx_per_min", "prompt_cached_pct",
                "in_tokens", "out_tokens")}
+    # total_tps is a DB column but was never projected into the series dict.
+    # The frontend reads sr.total_tps on the history path (metrics.html), so the
+    # TOTAL TOKENS/SEC tile, its two sparklines and the whole TOKEN THROUGHPUT
+    # card rendered empty on 1h/24h/7d while working fine on the live path.
+    series["total_tps"] = [
+        (r.get("in_tps") or 0) + (r.get("out_tps") or 0) for r in rows]
+    # Absolute KV budget in history, so a past window can answer "how many
+    # tokens of headroom were left" rather than only "what percent".
+    for k in ("kv_capacity_tokens", "kv_used_tokens"):
+        series[k] = [r.get(k) for r in rows]
+    # Per-seat t/s, aligned to the decimated points. Stored as JSON text
+    # (one small map per sample); parse into [None | [rate, ...]] sorted by
+    # seat id so the UI can render seat 1..N. A bad/None payload yields None,
+    # which is the honest "this backend has no seat axis" answer (vLLM).
+    def _seat_tps_of(r):
+        raw = r.get("seat_tps_json")
+        if not raw:
+            return None
+        try:
+            d = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(d, dict) or not d:
+            return None
+        try:
+            return [d[k] for k in sorted(d, key=lambda x: int(x))]
+        except (TypeError, ValueError):
+            return None
+
+    series["seat_tps"] = [_seat_tps_of(r) for r in rows]
     gpu = {k: [r.get(k) for r in gpu_rows] for k in
            ("ts", "sm_clock_mhz", "temp_c", "power_w", "throttle_active",
             "util_pct", "nvme_c")}

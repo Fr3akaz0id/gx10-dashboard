@@ -16,7 +16,9 @@ SAMPLE_COLS = ["ts", "port", "model", "kv_pct", "running", "waiting",
                "prefix_hit_rate", "spec_acceptance", "preempt_per_min",
                "total_tokens", "finish_per_min", "http_2xx_per_min",
                "http_4xx_per_min", "prompt_cached_pct",
-               "in_tokens", "out_tokens", "slot_cap", "slot_running"]
+               "in_tokens", "out_tokens", "slot_cap", "slot_running",
+               "kv_capacity_tokens", "kv_used_tokens", "kv_memory_bytes",
+               "seat_tps_json"]
 
 GPU_COLS = ["ts", "sm_clock_mhz", "sm_clock_max_mhz", "throttle_active",
             "throttle_sw_thermal_us", "throttle_hw_thermal_us",
@@ -94,8 +96,18 @@ MIGRATE_V2 = [
     ("samples", "ttft_p99", "REAL"),
     ("samples", "slot_cap", "REAL"),
     ("samples", "slot_running", "REAL"),
+    # Absolute KV budget: the percentage alone has no denominator, so history
+    # could not answer "how many tokens of headroom were left at 14:00".
+    ("samples", "kv_capacity_tokens", "REAL"),
+    ("samples", "kv_used_tokens", "REAL"),
+    ("samples", "kv_memory_bytes", "REAL"),
+    # Per-seat decode rates as a JSON object {"slot_id": rate}, for the
+    # backends with a real seat identity (llama.cpp /slots). NULL on vLLM,
+    # which has no seat axis. Stored so per-seat t/s survives the ring and a
+    # restart — in-memory it would only ever be visible for the last hour.
+    ("samples", "seat_tps_json", "TEXT"),
 ]
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def connect(path, readonly=False):
