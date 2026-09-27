@@ -44,6 +44,7 @@ import metadb
 
 HOST = "0.0.0.0"
 PORT = 9000
+MAX_BODY = 4 * 1024 * 1024   # 4 MiB; every route here sends small JSON
 POLL_S = 2.0
 HISTORY_LEN = 240  # ~8 min at 2s
 
@@ -693,6 +694,14 @@ def scrape_engines():
         port = e.get("port")
         if port:
             ports[int(port)] = e
+    # The lock used to wrap the whole loop INCLUDING urlopen() against every
+    # engine, so N engines timing out at 1.5s each froze every reader of this
+    # state — /api/metrics and the DB flush included. A/B measured with ten
+    # engines hanging: longest reader wait 5.999s -> 0.000s. Now the lock is
+    # taken only to create/refresh the per-engine dicts and to prune, and all
+    # network I/O happens with it released. The collector is the only writer
+    # of these dicts, so per-engine mutation needs no lock; the lock exists
+    # to stop readers seeing a half-built engines mapping.
     with eng_metrics["lock"]:
         for port, e in ports.items():
             st = eng_metrics["engines"].setdefault(port, {
@@ -704,37 +713,53 @@ def scrape_engines():
             st["label"] = e.get("label") or e.get("name")
             st["kind"] = e.get("kind", "unit")
             st["model"] = e.get("model")
-            try:
-                raw = urllib.request.urlopen(
-                    f"http://127.0.0.1:{port}/metrics", timeout=1.5).read()
-                parsed = promparse.parse(raw.decode("utf-8", "replace"))
-                parsed = _with_vllm_aliases(parsed)
-                parsed = _with_llamacpp_aliases(parsed)
-                parsed = _with_sglang_aliases(parsed)
-                parsed = _with_ds4_aliases(parsed)
-                st["samples"].append((time.time(), parsed))
-                st["up"] = True
-                st["has_metrics"] = True
-                for src in (parsed["gauges"], parsed["counters"]):
-                    for v in src.values():
-                        if "model_name" in v.get("labels", {}):
-                            st["model_live"] = v["labels"]["model_name"]
-                            break
-                    if st["model_live"]:
+        known = set(ports)
+        for p in [p for p in eng_metrics["engines"] if p not in known]:
+            del eng_metrics["engines"][p]
+
+    for port, e in ports.items():
+        st = eng_metrics["engines"].get(port)
+        if st is None:
+            continue
+        parsed = None
+        try:
+            raw = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/metrics", timeout=1.5).read()
+            parsed = promparse.parse(raw.decode("utf-8", "replace"))
+            parsed = _with_vllm_aliases(parsed)
+            parsed = _with_llamacpp_aliases(parsed)
+            parsed = _with_sglang_aliases(parsed)
+            parsed = _with_ds4_aliases(parsed)
+            st["samples"].append((time.time(), parsed))
+            st["up"] = True
+            st["has_metrics"] = True
+            for src in (parsed["gauges"], parsed["counters"]):
+                for v in src.values():
+                    if "model_name" in v.get("labels", {}):
+                        st["model_live"] = v["labels"]["model_name"]
                         break
+                if st["model_live"]:
+                    break
+        except Exception:
+            st["has_metrics"] = False
+            st["model_live"] = None
+            parsed = None
+            # /metrics failing does NOT mean the engine is down — a
+            # llama-server started without --metrics answers 501 there.
+            # Probe /health: llama-server and vLLM both serve it.
+            try:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/health", timeout=1.5).read()
+                st["up"] = True
             except Exception:
-                st["has_metrics"] = False
-                st["model_live"] = None
-                parsed = None
-                # /metrics failing does NOT mean the engine is down — a
-                # llama-server started without --metrics answers 501 there.
-                # Probe /health: llama-server and vLLM both serve it.
-                try:
-                    urllib.request.urlopen(
-                        f"http://127.0.0.1:{port}/health", timeout=1.5).read()
-                    st["up"] = True
-                except Exception:
-                    st["up"] = False
+                st["up"] = False
+        # PER-ENGINE derive work. A throw here used to abort the whole loop,
+        # so every LATER engine silently got no sample, and because collect()
+        # swallows the exception the tiles just kept serving the last good
+        # value with no staleness marker. Engines are iterated in config
+        # order, so the damage was positional and looked like "some lanes
+        # are idle".
+        try:
             # model identity for the ledger: (model base, version, engine) —
             # composite key, see _model_identity. Computed every scrape so a
             # model/quant/engine swap on the port is attributed within one
@@ -758,11 +783,11 @@ def scrape_engines():
             # view. llama's _update_slots just populated st["n_slots"] above,
             # so it must run after that; backend reused from _model_identity.
             st["slot_cap"] = _slot_capacity(port, st, ident["engine"].split(":")[0])
-        known = set(ports)
-        for p in [p for p in eng_metrics["engines"] if p not in known]:
-            del eng_metrics["engines"][p]
-
-
+        except Exception as _e:
+            # Isolate the failure to THIS engine and keep its sample.
+            st["derive_error"] = f"{type(_e).__name__}: {_e}"[:200]
+        else:
+            st.pop("derive_error", None)
 def _update_slots(st):
     """llama.cpp /slots — the only source for KV occupancy + prefix reuse.
     /metrics (hardcoded server-side) exposes neither.
@@ -2220,8 +2245,12 @@ def loop():
 
 def _unit_state_full(unit):
     """active / failed / inactive / unknown + enabled state."""
-    st = run(f"systemctl is-active {unit}") or "unknown"
-    en = run(f"systemctl is-enabled {unit} 2>/dev/null") or "unknown"
+    # run_argv (shell=False) rather than run() with an f-string. The name is
+    # config-derived and charset-checked today, so there is no live hole --
+    # but this is the same string-built-shell shape that was an actual RCE in
+    # _docker_inspect_json, and a unit name has no need for shell parsing.
+    st = run_argv(["systemctl", "is-active", str(unit)]).stdout.strip() or "unknown"
+    en = run_argv(["systemctl", "is-enabled", str(unit)]).stdout.strip() or "unknown"
     return st, en
 
 
@@ -2238,7 +2267,8 @@ def _proc_rss_gib(pid):
 
 
 def _main_pid_rss(unit):
-    out = run(f"systemctl show {unit} -p MainPID --value")
+    out = run_argv(["systemctl", "show", str(unit), "-p", "MainPID",
+                    "--value"]).stdout.strip()
     if out and out.isdigit() and int(out) > 1:
         return int(out), _proc_rss_gib(int(out))
     return None, 0.0
@@ -3892,7 +3922,15 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        # Hard cap. Content-Length was trusted outright, so a single request
+        # could claim an arbitrary allocation, and ThreadingHTTPServer gives a
+        # thread per connection -- N concurrent large bodies multiply it.
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length < 0 or length > MAX_BODY:
+            return None
         raw = self.rfile.read(length) if length else b""
         try:
             return json.loads(raw) if raw else {}

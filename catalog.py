@@ -478,10 +478,19 @@ def docker_containers(include_exited=True):
 
 
 def _docker_inspect_json(name):
-    r = run(f"docker inspect {name}")
+    # shell=True WITH AN INTERPOLATED NAME IS REMOTE CODE EXECUTION.
+    # `name` comes off the URL path in /api/engines/docker/<name>; the route
+    # regex is [^/]+, which does not stop shell metacharacters. Verified live
+    # before fixing: the injected command ran as this user (NOPASSWD sudo).
+    # stderr came back in the JSON error, so it was a non-blind channel.
+    name = _safe_name(name)
+    r = run_argv(["docker", "inspect", name])
     if r.returncode != 0:
-        raise RuntimeError(f"docker inspect {name}: {r.stderr.strip()}")
-    return json.loads(r.stdout)[0]
+        raise RuntimeError("docker inspect failed: %s" % (r.stderr.strip() or r.stdout.strip()))
+    data = json.loads(r.stdout)
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("docker inspect returned no such object")
+    return data[0]
 
 
 def recipe_from_inspect(name):
@@ -495,7 +504,14 @@ def recipe_from_inspect(name):
         # skip docker-injected defaults
         if e.startswith(("PATH=", "HOSTNAME=", "HOME=", "TERM=", "container=", "LS_COLORS=", "PYTHONPATH=", "PYTHON_", "CPLUS_INCLUDE", "C_INCLUDE", "LD_LIBRARY", "PKG_", "GPG_", "TZ=", "DEBIAN", "LESSCLOSE", "LESSOPEN", "HOSTNAME", "NVIDIA_REQUIRE", "NVIDIA_VISIBLE", "NVIDIA_DRIVER", "DOCKER_IMAGE")):
             continue
-        envs.append(e)
+        # Redact anything credential-shaped. The old code kept every
+        # non-default var, so a container carrying HF_TOKEN or VLLM_API_KEY
+        # had it served in cleartext AND persisted into recipes/<name>.json.
+        k, _, v = e.partition("=")
+        if _SECRET_KEY_RE.search(k):
+            envs.append("%s=%s" % (k, _REDACTED if v else ""))
+        else:
+            envs.append(e)
     binds = hc.get("Binds") or []
     # normalize binds to src:dst:mode
     mounts = []
@@ -538,8 +554,28 @@ def recipe_from_inspect(name):
     return rec
 
 
+def _recipe_path(name):
+    """Resolve a recipe file, refusing anything outside RECIPE_DIR.
+
+    The name reaches here from an unauthenticated POST body and a plain
+    os.path.join walks straight out of the directory. Two independent checks,
+    so neither is a single mistake away from a hole: _safe_name rejects any
+    metacharacter or slash, and the realpath containment check catches
+    anything that still gets through.
+    """
+    name = _safe_name(name)
+    p = os.path.realpath(os.path.join(RECIPE_DIR, f"{name}.json"))
+    root = os.path.realpath(RECIPE_DIR)
+    if os.path.dirname(p) != root:
+        raise ValueError("recipe path escapes RECIPE_DIR")
+    return p
+
+
 def load_recipe(name):
-    p = os.path.join(RECIPE_DIR, f"{name}.json")
+    try:
+        p = _recipe_path(name)
+    except ValueError:
+        return None
     if os.path.isfile(p):
         with open(p) as f:
             return json.load(f)
@@ -548,7 +584,7 @@ def load_recipe(name):
 
 def save_recipe(rec):
     os.makedirs(RECIPE_DIR, exist_ok=True)
-    p = os.path.join(RECIPE_DIR, f"{rec['name']}.json")
+    p = _recipe_path(rec["name"])
     with open(p, "w") as f:
         json.dump(rec, f, indent=2)
     return p
@@ -584,10 +620,14 @@ def docker_run_command(rec):
 
 def docker_apply(rec, confirm_running_loss=True):
     """Recreate the container from the recipe. Returns (ok, detail)."""
-    name = rec["name"]
+    # rec["name"] comes from an on-disk recipe that save_recipe accepts from
+    # an unauthenticated POST body, so it is untrusted. Validate at the point
+    # of use as well, and use run_argv so a metacharacter could never become
+    # a second command.
+    name = _safe_name(rec["name"])
     # stop + remove if present
-    run(f"docker stop {name}")
-    run(f"docker rm {name}")
+    run_argv(["docker", "stop", name])
+    run_argv(["docker", "rm", name])
     parts = docker_run_command(rec)
     cmd = " ".join(_shq(x) for x in parts)
     r = run(cmd, timeout=60)
@@ -603,6 +643,13 @@ def _shq(s):
 
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+# Matches credential-looking env var NAMES (not values): TOKEN, API_KEY,
+# SECRET, PASSWORD, CREDENTIAL, PRIVATE_KEY, ACCESS_KEY, AUTH.
+_SECRET_KEY_RE = re.compile(
+    r"(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|ACCESS_?KEY|"
+    r"PRIVATE_?KEY|AUTH)", re.I)
+_REDACTED = "***redacted***"
 
 
 def _safe_name(name):

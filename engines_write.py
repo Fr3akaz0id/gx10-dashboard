@@ -259,6 +259,7 @@ def set_env(text, key, value):
     appends a new Environment line after the last existing one.
     Returns changed=False when the stored value already equals `value`
     (after unquoting)."""
+    key = _env_key(key)
     pattern = re.compile(
         r"^(?P<ws>\s*)Environment=" + re.escape(key)
         + r"=([\"']?)(?P<val>.*?)([\"']?)\s*$", re.M)
@@ -302,6 +303,30 @@ def remove_env(text, key):
     new_text = text[: m.start()] + text[m.end():]
     _verify_env_removed(new_text, key)
     return new_text, True
+
+
+# fullmatch, not match: "$" also matches just BEFORE a trailing newline, so
+# re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", "A\n") succeeds and the key still
+# injects a line break into the unit file.
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_key(key):
+    """Validate an Environment= key.
+
+    The key used to be written into the unit file RAW while only the value
+    went through _env_quote, so a key containing a newline injected whole
+    new directives into a systemd unit -- e.g. an ExecStartPre line, which
+    systemd executes as root. _verify_env only re-matched the FIRST
+    Environment= line, so the injected line passed verification. Not
+    exploitable end-to-end only because /etc/systemd/system is root-owned
+    and the service is not root -- which is exactly the kind of "not today"
+    that becomes "today" when a unit is made group-writable.
+    """
+    k = str(key)
+    if not _ENV_KEY_RE.fullmatch(k):
+        raise ValueError("invalid environment key: %r" % (k[:60],))
+    return k
 
 
 def _env_quote(value):
