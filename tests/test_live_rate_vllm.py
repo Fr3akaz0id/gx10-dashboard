@@ -29,8 +29,8 @@ regression and the opt-in live-engine check.
 """
 import sys, time
 sys.path.insert(0, __file__.rsplit("/", 1)[0].rsplit("/", 1)[0])
-import dashboard as D
-
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+from _bootstrap import D
 W = D.VLLM_LIVE_RATE_WINDOW_S
 NOW = time.time()
 

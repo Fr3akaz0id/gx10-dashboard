@@ -2,6 +2,7 @@
 even when the row count exceeds limit (the old code SQL-LIMITed to `limit`
 rows first, silently dropping the oldest data and keeping only the recent slice).
 """
+import tempfile
 import os, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import metadb

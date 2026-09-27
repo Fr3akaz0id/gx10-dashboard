@@ -12,11 +12,11 @@ history was wrong, and it was wrong because the counts were not stored.
 
 Run: python3 tests/test_ratio_weighting.py
 """
+import tempfile
 import json
 import os
 import sqlite3
 import sys
-import tempfile
 import time
 import unittest
 
@@ -24,7 +24,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 
-import dashboard as D
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+
+from _bootstrap import D
 import metadb
 
 

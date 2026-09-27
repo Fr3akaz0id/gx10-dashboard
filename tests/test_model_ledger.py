@@ -7,7 +7,8 @@ In-memory DB, no dashboard imports needed for the metadb half; the
 dashboard identity helpers are tested with faked proc/args.
 """
 import os, sys, time
-sys.path.insert(0, "/opt/gx10-dashboard")
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import metadb
 
 
@@ -122,8 +123,9 @@ assert metadb.model_ledger_all(c)[0]["in_tokens"] == 10
 c.close()
 
 # ── dashboard identity helpers ────────────────────────────────
-import dashboard
-
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+from _bootstrap import dashboard
+import metadb
 # shard stripping
 assert dashboard._strip_shards("Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004") == "Qwen3.8-Flash-Next-UD-Q4_K_XL"
 assert dashboard._strip_shards("plain-name") == "plain-name"

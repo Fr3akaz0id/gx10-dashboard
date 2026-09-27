@@ -31,12 +31,12 @@ import sys
 import time
 import unittest
 
-sys.path.insert(0, __file__.rsplit("/", 1)[0].rsplit("/", 1)[0])
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import dashboard as D
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
 
-
+from _bootstrap import D
 def _sample(gen_total, prompt_total, hist_sum, hist_count, decode_sum):
     """One scrape shaped like real vLLM /metrics output."""
     return {"gauges": {}, "counters": {

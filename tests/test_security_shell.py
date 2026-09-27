@@ -5,16 +5,16 @@ is a harmless marker file; a test FAILS if the marker appears.
 
 Run: python3 tests/test_security_shell.py
 """
+import tempfile
 import os
 import sys
 import glob
-import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import catalog
-import dashboard as D
-
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+from _bootstrap import D
 MARK = os.path.join(tempfile.gettempdir(), "audit_shelltest_marker")
 FAILS = []
 

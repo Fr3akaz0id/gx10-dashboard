@@ -3,10 +3,9 @@ tok/s on busy seats (from the request completion histograms diffed over a
 trailing window) instead of the aggregate÷running estimate, while a quiet
 vLLM lane (or sglang/ds4) keeps the estimate path. Pure in-memory: no
 network, no DB, no side effects."""
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import dashboard as D
-
+import sys
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+from _bootstrap import D
 W = D.VLLM_SLOT_RATE_WINDOW_S
 
 

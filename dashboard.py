@@ -1713,10 +1713,16 @@ def _seat_rate_series(st, idx, pts):
 
 
 DB_PATH = os.path.join(BASE_DIR, "metrics.db")
-DB_FLUSH_EVERY = 15          # polls between DB writes (15 * 2s = 30s cadence)
+# Nominal seconds between DB sample writes. The gate is wall time, NOT a poll
+# count: counting polls adds every collect()'s cost to the period, so the
+# real cadence drifted to 32.2s against a 30s target and the differenced
+# rate series undercounted by that margin.
+SAMPLE_FLUSH_S = 30.0
+DB_FLUSH_EVERY = 15          # retained for reference; the time gate governs
 DB_RETENTION_DAYS_DEFAULT = 14
 _db_last_prune_check = 0.0
 _last_ledger_flush = None
+_last_sample_flush = 0.0
 _gpu_hw_cache = {"t": 0.0, "val": None}
 _net_tx = {"t": 0.0, "b": 0.0}
 # throttle-since state: which set of reasons is active and when that exact
@@ -2098,7 +2104,7 @@ def _db_maybe_write(gpu_info_now):
 
 
 def collect():
-    global _last_cpu, _poll_count
+    global _last_cpu, _poll_count, _last_sample_flush
     mi = meminfo()
     idle, total = cpu_times()
     cpu_pct = 0.0
@@ -2172,7 +2178,20 @@ def collect():
     except Exception:
         pass
     _poll_count += 1
-    if _poll_count % DB_FLUSH_EVERY == 0:
+    # Gate the DB write on WALL TIME, not a poll count. Counting polls makes
+    # the cadence POLL_S * DB_FLUSH_EVERY PLUS the cost of every collect(),
+    # so the real period drifts above the nominal 30s (measured 32.2s mean on
+    # :8001) and the rate-based series quietly undercount. Decimals like
+    # vllm:generation_tokens_total are differenced between consecutive
+    # samples, so a longer period is not merely cosmetic.
+    _now = time.time()
+    if (_now - _last_sample_flush) >= SAMPLE_FLUSH_S:
+        _last_sample_flush = _now
+        # Deliberately not wrapped in a bare except: a failure here means
+        # samples silently stop, which looks identical to "the lane is idle"
+        # and is very hard to spot. _db_maybe_write is itself never-raising,
+        # so anything surfacing here is a real bug (a NameError from a missing
+        # `global` declaration once silenced the entire writer for minutes).
         _db_maybe_write(g)
     h = history
     h["ts"].append(m["ts"])

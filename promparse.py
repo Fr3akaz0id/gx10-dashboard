@@ -156,21 +156,37 @@ def percentile(buckets, p):
     """Percentile over cumulative histogram buckets [(le, count)...], p in (0, 100].
 
     Linear interpolation within the containing band — same convention as
-    Prometheus histogram_quantile. Returns None when the total count is 0 or
-    the band is +Inf (no finite bound).
+    Prometheus histogram_quantile. Returns None when the total count is 0.
+
+    The +Inf band returns the highest FINITE bucket bound, which is what
+    histogram_quantile does. Returning None there (the old behaviour) silently
+    deleted the percentile whenever >1% of observations sat above the top
+    finite `le` — e.g. vllm:request_params_max_tokens on a lane whose
+    p50/p95/p99 were all None because every observation exceeded the largest
+    edge. A percentile is still bounded below by the last finite edge we know
+    of, so that is the honest answer; callers that want to flag it can compare
+    against the top edge themselves.
     """
     if not buckets:
         return None
     total = buckets[-1][1]
-    if total <= 0:
+    if total is None or total <= 0:
         return None
     rank = total * (p / 100.0)
     prev_le, prev_c = 0.0, 0.0
+    top_finite = None
     for le, c in buckets:
+        if c is None:
+            continue
+        if le != float("inf"):
+            top_finite = le
         if c >= rank:
             if le == float("inf"):
-                return None
+                # +Inf band: fall back to the last finite bound (Prometheus
+                # histogram_quantile behaviour), else None if there was none.
+                return top_finite
             frac = (rank - prev_c) / max(c - prev_c, 1e-9)
             return prev_le + (le - prev_le) * frac
         prev_le, prev_c = le, c
-    return None
+    # rank beyond the last bucket
+    return top_finite

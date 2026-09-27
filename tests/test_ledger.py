@@ -1,7 +1,7 @@
 """Ledger tests: watermarks, restart resets, backfill baseline adoption,
 series reconstruction. In-memory DB, no dashboard imports needed."""
 import os, sys, time
-sys.path.insert(0, "/opt/gx10-dashboard")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import metadb
 
 c = metadb.connect(":memory:")

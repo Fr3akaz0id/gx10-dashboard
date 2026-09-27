@@ -1,8 +1,8 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import promparse
-import dashboard
-
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+from _bootstrap import dashboard
 # Minimal realistic SGLang /metrics surface: token counters carry an
 # is_streaming={false,true} split, gauges are 0-1 fractions, latency
 # histograms are multi-labeled.

@@ -26,8 +26,16 @@ def main():
     # 3 obs <= 0.01, 15 in (0.01,0.1], 5 in (0.1,+Inf]; P50 lands in (0.01,0.1]
     p50 = promparse.percentile(h["buckets"], 50)
     assert p50 is not None and 0.01 <= p50 <= 0.1, p50
+    # rank 27 falls in (0.1, +Inf]. This USED to assert None ("no finite
+    # bound"), which silently deleted the p95 of every histogram whose top
+    # band holds >1% of observations -- live on the :8001 lane, where
+    # vllm:request_params_max_tokens lost p50/p95/p99 entirely. Prometheus
+    # histogram_quantile returns the top FINITE bound instead, so we now
+    # return 0.1 (the last finite le), never None.
     p95 = promparse.percentile(h["buckets"], 95)
-    assert p95 is None, p95  # rank 27 falls in (0.1, +Inf] -> no finite bound
+    assert p95 == 0.1, p95  # +Inf band -> top finite bound, not None
+    # a histogram with NO finite bucket at all is the only None case
+    assert promparse.percentile([(float("inf"), 30)], 95) is None
     # with a finite 1.0 band present, p99 interpolates in (0.1, 1.0]
     b2 = [(0.01, 10), (0.1, 25), (1.0, 30)]
     p99 = promparse.percentile(b2, 99)

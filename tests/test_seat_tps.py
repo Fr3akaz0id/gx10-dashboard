@@ -13,18 +13,20 @@ scrape samples and a stubbed /slots fetch. The contract under test:
   - Absolute KV tokens come from cache_config_info on vLLM and from the
     summed n_ctx on llama.cpp, and render through the same field.
 """
+import tempfile
 import json
 import os
 import sys
-import tempfile
 import time
 import unittest
 from unittest import mock
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+from _bootstrap import D
 
-import dashboard as D
+import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
+
+from _bootstrap import D
 import metadb
 import promparse
 
