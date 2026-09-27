@@ -4162,7 +4162,19 @@ class H(BaseHTTPRequestHandler):
                         if not mkey:
                             err("model key required")
                             return
+                        # Report honestly when nothing matched. reset_model
+                        # deletes by exact key; a key mangled in transit (the
+                        # NUL-separated triple cannot survive an HTML
+                        # attribute intact) matches zero rows, and the UI
+                        # showed "removed" while the card stayed on screen.
+                        pre = rc.execute("SELECT COUNT(*) FROM model_ledger "
+                                         "WHERE key=?",
+                                         (metadb._norm_key(mkey),)).fetchone()[0]
                         metadb.reset_model(rc, mkey, live_models)
+                        if not pre:
+                            err("no ledger row matched that key; the card "
+                                "may need a reload")
+                            return
                     elif action == "energy":
                         metadb.reset_energy(rc)
                     elif action == "all":

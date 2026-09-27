@@ -355,6 +355,13 @@ def ledger_update(c, port, in_total, out_total, power_w, ts=None):
     prev_t = c.execute("SELECT value FROM meta WHERE key='ledger_prev_power_ts'").fetchone()
     e_cum = c.execute("SELECT energy_kwh_cum FROM ledger ORDER BY ts DESC LIMIT 1").fetchone()
     e_cum = (e_cum["energy_kwh_cum"] or 0.0) if e_cum and e_cum["energy_kwh_cum"] else 0.0
+    # After a token reset the ledger is empty, so the running integral would
+    # restart from 0 and the lifetime electricity meter would collapse to
+    # whatever accrues from now on. Resume from the preserved floor instead,
+    # so energy is genuinely preserved across every reset tier.
+    floor = _energy_floor(c)
+    if floor > e_cum:
+        e_cum = floor
     if power_w is not None and prev_p is not None and prev_t is not None:
         dt = now - int(prev_t["value"])
         if dt > 0 and dt < 600:  # gap sanity: don't bill a stale gap
@@ -395,7 +402,20 @@ def model_ledger_update(c, port, key, model, version, engine, in_total, out_tota
     None counters skip token work entirely."""
     now = int(ts or time.time())
     if not key:
-        return
+        # No identity this scrape. The per-port `ledger` row has already been
+        # credited by ledger_update(), so returning here made those tokens
+        # STRUCTURALLY UNREACHABLE from TOKENS BY MODEL -- they counted toward
+        # the ALL-TIME header and nothing else, forever. (Seen on :30000,
+        # whose model_watermarks row carried key=NULL: 61.8M in / 941k out
+        # invisible on the per-model card.)
+        #
+        # Fall back to a synthetic per-port key so the credit lands somewhere
+        # attributable-to-the-lane. The row is flagged INITIAL (unobserved) on
+        # the first observation, because with no model identity we genuinely
+        # cannot say which model served the pre-existing watermark.
+        key = f"\x00unattributed\x00port:{port}"
+        model = model or f"(unattributed :{port})"
+        engine = engine or f"port:{port}"
     wm = c.execute("SELECT key, in_tokens_max, out_tokens_max FROM "
                    "model_watermarks WHERE port=?", (port,)).fetchone()
     same = wm is not None and wm["key"] == key
@@ -516,18 +536,57 @@ def ledger_series(c, limit=1440):
     return {"ts": ts_out, "in_cum": in_out, "out_cum": out_out, "kwh_cum": e_out}
 
 
+def _energy_floor(c):
+    """The all-time electricity total that must never be LOST, whatever a
+    reset does to the token ledger.
+
+    gpu_hw is pruned at 14d, so query_energy_kwh(c, 0) only ever sees the
+    retained window. Re-seeding the ledger's energy from that after a token
+    reset silently rewrote a lifetime meter in terms of two weeks: measured
+    13.67 -> 6.99 kWh (-49%) from one click on "reset tokens", whose own
+    docstring promises to "keep energy". The true lifetime figure is therefore
+    parked in meta and treated as a floor on every re-seed.
+    """
+    r = c.execute("SELECT value FROM meta WHERE key='ledger_energy_floor'").fetchone()
+    try:
+        return float(r["value"]) if r and r["value"] else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _preserve_energy(c):
+    """Park the current ledger energy high-water into meta before the ledger
+    rows are deleted, so a reset can never lose it."""
+    r = c.execute("SELECT MAX(energy_kwh_cum) AS m FROM ledger").fetchone()
+    cur = float(r["m"]) if r and r["m"] else 0.0
+    if cur > _energy_floor(c):
+        c.execute("INSERT OR REPLACE INTO meta(key,value) "
+                  "VALUES('ledger_energy_floor',?)", (str(cur),))
+    return cur
+
+
 def ledger_backfill(c, since_ts):
     """One-time seed: rebuild the ledger from the samples table (which holds
     in-window 30s token deltas). Sums all retained history per port into an
-    initial cumulative row. Called only when the ledger table is empty."""
+    initial cumulative row.
+
+    Runs when the ledger has no rows AND no 'ledger_backfilled' marker is
+    present -- previously only the row COUNT was checked, so a deliberate
+    token reset (which empties the ledger) was immediately undone by this
+    function re-seeding from samples. The marker is what makes an intentional
+    reset stick; it is written on a genuine first run and by every reset tier.
+
+    Energy is seeded as MAX(retained gpu_hw integral, the preserved lifetime
+    floor) so a re-seed can only ever move the electricity meter forward."""
+    done = c.execute("SELECT value FROM meta WHERE key='ledger_backfilled'").fetchone()
     n = c.execute("SELECT COUNT(*) AS n FROM ledger").fetchone()["n"]
-    if n:
+    if n or done:
         return 0
     rows = c.execute("SELECT port, SUM(in_tokens) AS i, SUM(out_tokens) AS o, "
                      "MIN(ts) AS t0 FROM samples WHERE ts>=? "
                      "GROUP BY port", (since_ts,)).fetchall()
     t0 = int(time.time())
-    e0 = query_energy_kwh(c, 0)  # all retained gpu_hw history
+    e0 = max(query_energy_kwh(c, 0), _energy_floor(c))  # never LOSE lifetime kWh
     for r in rows:
         c.execute("INSERT OR REPLACE INTO ledger (ts, port, in_tokens_cum, "
                   "out_tokens_cum, energy_kwh_cum) VALUES (?,?,?,?,?)",
@@ -581,16 +640,23 @@ def reset_windows(c):
     """T1: wipe samples + gpu_hw (chart history). Ledger + watermarks kept."""
     c.execute("DELETE FROM samples")
     c.execute("DELETE FROM gpu_hw")
+    # gpu_hw was the only source the ledger could re-seed energy from, so park
+    # the lifetime total before those rows disappear.
+    _preserve_energy(c)
     c.commit()
 
 
 def reset_tokens(c, live_counters):
     """T2: zero ALL-TIME token totals (ledger), keep energy + watermarks
     rebased to live counters so uptime isn't double-credited."""
+    # Park the lifetime electricity FIRST: the ledger rows about to be deleted
+    # are the only record of it, and the docstring promises to keep it.
+    _preserve_energy(c)
     c.execute("DELETE FROM ledger")
     _zero_ledger(c, live_counters)
     # force re-backfill skip: ledger now empty but backfill would reseed
-    # from samples — mark it done so the empty state sticks
+    # from samples — mark it done so the empty state sticks. This marker is
+    # now actually READ by ledger_backfill (it used to be written and ignored).
     c.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('ledger_backfilled',?)",
               (str(int(time.time())),))
     c.commit()
@@ -609,10 +675,28 @@ def reset_models(c, live_models):
     c.commit()
 
 
+def _norm_key(k):
+    """Normalise a model key that has been through HTML.
+
+    The ledger key is a NUL-separated triple ("model\x00version\x00engine").
+    NUL is not representable in an HTML attribute -- the browser decodes it
+    to U+FFFD REPLACEMENT CHARACTER. A key that arrived through the DOM
+    therefore looks like "m\ufffd?\ufffdvllm:1" and matches no row, so
+    DELETE ... WHERE key=? silently affected 0 rows while the UI reported
+    success and the card stayed on screen. Map U+FFFD back to NUL before
+    comparing. Escaping is applied on both sides so a genuine U+FFFD that
+    round-trips cleanly is unaffected.
+    """
+    if isinstance(k, str):
+        k = k.replace("\ufffd", "\x00")
+    return k
+
+
 def reset_model(c, key, live_models):
     """Remove ONE (model, version, engine) card. If it's the currently
     running model on some port, rebase that port's watermark so the next
     flush doesn't credit the full lifetime counter."""
+    key = _norm_key(key)
     c.execute("DELETE FROM model_ledger WHERE key=?", (key,))
     rows = c.execute("SELECT port FROM model_watermarks WHERE key=?",
                      (key,)).fetchall()
@@ -632,6 +716,9 @@ def reset_energy(c):
     anchors (meta) cleared so the next flush starts a fresh integral."""
     c.execute("UPDATE ledger SET energy_kwh_cum=0")
     c.execute("DELETE FROM meta WHERE key IN ('ledger_prev_power','ledger_prev_power_ts')")
+    # The lifetime floor MUST go too, or the next backfill re-seeds the energy
+    # meter from it and the "zero energy" reset silently un-does itself.
+    c.execute("DELETE FROM meta WHERE key='ledger_energy_floor'")
     c.commit()
 
 
