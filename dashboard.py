@@ -82,12 +82,32 @@ _db_conn = None
 
 
 def run(cmd, timeout=5):
+    """Run a FIXED command line (no caller-supplied interpolation!) and return
+    stdout. For anything built from request input use run_argv() instead —
+    run() goes through a shell, so a caller-supplied fragment in `cmd` is
+    command injection."""
     try:
         return subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
         ).stdout.strip()
     except Exception:
         return ""
+
+
+def run_argv(argv, timeout=5):
+    """Run a command from an ARGV LIST with shell=False and return the
+    CompletedProcess (so .returncode/.stdout/.stderr are real). This is the
+    only safe way to build a command from request input: no shell parses the
+    arguments, so ; > $() and friends are inert data. Never raises."""
+    try:
+        return subprocess.run(
+            list(argv), shell=False, capture_output=True, text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(list(argv), 124, "", "timeout")
+    except Exception as e:
+        return subprocess.CompletedProcess(list(argv), 1, "", str(e))
 
 
 def meminfo():
@@ -2502,24 +2522,55 @@ def unit_env_op(unit, op, key, value=None):
     return {"changed": True, "backup": bak}
 
 
+_DOCKER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _safe_docker_name(name):
+    """A docker container name is [a-zA-Z0-9][a-zA-Z0-9_.-]* — enforce it here
+    so no shell/argv consumer can ever see a metacharacter."""
+    if not name or not _DOCKER_NAME_RE.match(name):
+        raise ValueError("bad container name")
+    return name
+
+
+def _systemctl_argv(*args):
+    """systemctl argv, prefixed with sudo when we are not already root.
+
+    Under a non-sudo user the prefix is skipped and systemctl simply fails as
+    before."""
+    argv = ["systemctl", *args]
+    if os.geteuid() != 0:
+        argv = ["sudo", "-n", *argv]
+    return argv
+
+
 def unit_action(unit, action):
     ok_actions = {"start", "stop", "restart", "enable", "disable"}
     if action not in ok_actions:
         raise ValueError("bad action")
-    r = run(f"systemctl {action} {unit}", timeout=60)
+    # Membership gate: only units declared in config.json may be acted on.
+    # Without this, /api/engines/unit/<any>/action could act on ANY unit
+    # on the box. _config_unit_path also enforces the basename + charset.
+    if not _config_unit_path(unit):
+        raise ValueError("unit not in config")
+    unit = _safe_docker_name(unit)
+    if not unit.endswith(".service"):
+        unit += ".service"
+    r = run_argv(_systemctl_argv(action, unit), timeout=60)
     return {"ok": r.returncode == 0, "detail": (r.stderr or r.stdout).strip()[:500]}
 
 
 def docker_action(name, action):
     if action == "apply":
-        rec = catalog.ensure_recipe(name)
+        rec = catalog.ensure_recipe(_safe_docker_name(name))
         ok, detail = catalog.docker_apply(rec)
         return {"ok": ok, "detail": detail}
+    name = _safe_docker_name(name)
     if action in {"start", "stop", "restart"}:
-        r = run(f"docker {action} {name}", timeout=120)
+        r = run_argv(["docker", action, name], timeout=120)
         return {"ok": r.returncode == 0, "detail": (r.stderr or r.stdout).strip()[:500]}
     if action == "rm":
-        r = run(f"docker rm -f {name}", timeout=30)
+        r = run_argv(["docker", "rm", "-f", name], timeout=30)
         return {"ok": r.returncode == 0, "detail": (r.stderr or r.stdout).strip()[:500]}
     raise ValueError("bad action")
 
@@ -3517,6 +3568,12 @@ def setup_apply(body):
 
 
 
+# CORS: empty by default = same-origin only. A browser on another site cannot
+# read this API, and the write/exec routes are not reachable cross-origin.
+# Add explicit origins here only if a separate frontend needs them.
+_CORS_ALLOWED_ORIGINS = set()
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -3525,7 +3582,15 @@ class H(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # CORS: same-origin only. A wildcard let ANY web page the operator
+        # visited drive the write/exec routes cross-origin. The dashboard is
+        # served from this same host, so a same-origin XHR needs no CORS
+        # header at all. Add explicit origins to _CORS_ALLOWED_ORIGINS only if
+        # a separate frontend is ever hosted elsewhere.
+        origin = self.headers.get("Origin")
+        if origin and origin in _CORS_ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
@@ -3621,10 +3686,16 @@ class H(BaseHTTPRequestHandler):
             lm = re.search(r"lines=(\d+)", qs)
             if lm:
                 lines = min(int(lm.group(1)), 2000)
-            if _config_unit_path(name):
-                self._json({"logs": catalog.engine_logs(name + ("" if name.endswith(".service") else ".service"), tail=lines)})
-            else:
-                self._json({"logs": catalog.docker_logs(name, tail=lines)})
+            # Both branches validate `name` against the container/unit charset
+            # before it reaches a command (catalog._safe_name), so a name with
+            # ; > $() is rejected instead of executed.
+            try:
+                if _config_unit_path(name):
+                    self._json({"logs": catalog.engine_logs(name + ("" if name.endswith(".service") else ".service"), tail=lines)})
+                else:
+                    self._json({"logs": catalog.docker_logs(name, tail=lines)})
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
             return
         if path.startswith("/api/"):
             with state["lock"]:

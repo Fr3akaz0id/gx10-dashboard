@@ -602,13 +602,38 @@ def _shq(s):
     return "'" + s.replace("'", "'\\''") + "'"
 
 
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _safe_name(name):
+    """Container / unit names are [a-zA-Z0-9][a-zA-Z0-9_.-]*. Enforce it at the
+    boundary so a request-supplied name can never reach a command as a shell
+    metacharacter (; > $() and friends are rejected outright)."""
+    if not name or not _NAME_RE.match(name):
+        raise ValueError("bad name")
+    return name
+
+
+def run_argv(argv, timeout=15):
+    """subprocess with shell=False returning a real CompletedProcess. The only
+    safe way to build a command from request input."""
+    try:
+        return subprocess.run(list(argv), shell=False, capture_output=True,
+                              text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(list(argv), 124, "", "timeout")
+    except Exception as e:
+        return subprocess.CompletedProcess(list(argv), 1, "", str(e))
+
+
 def docker_logs(name, tail=200):
-    r = run(f"docker logs --tail {tail} {name} 2>&1")
+    r = run_argv(["docker", "logs", "--tail", str(int(tail)), _safe_name(name)])
     return (r.stdout or "") + (r.stderr or "")
 
 
 def engine_logs(unit, tail=120):
-    r = run(f"journalctl -u {unit} --no-pager -n {tail} 2>&1")
+    r = run_argv(["journalctl", "-u", _safe_name(unit), "--no-pager",
+                  "-n", str(int(tail))])
     return r.stdout or ""
 
 
@@ -703,9 +728,8 @@ def _listening_ports():
 
 def _unit_active(name):
     try:
-        return subprocess.run(
-            f"systemctl is-active {name} 2>/dev/null", shell=True,
-            capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
+        return run_argv(["systemctl", "is-active", _safe_name(name)],
+                        timeout=5).stdout.strip() or "unknown"
     except Exception:
         return "unknown"
 
