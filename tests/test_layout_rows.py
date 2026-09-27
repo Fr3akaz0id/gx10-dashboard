@@ -76,7 +76,16 @@ class TestRowsFillTheGrid(unittest.TestCase):
         'fix' that deletes a card to make the arithmetic work."""
         # Post-merge names. The metrics must survive the reorganisation —
         # a "fix" that deletes a card to make the arithmetic work is not a fix.
-        for heading in ("KV CACHE USED", "PREFIX CACHE HIT",
+        # Post-merge names. The metrics must survive the reorganisation --
+        # a "fix" that deletes a card to make the arithmetic work is not one.
+        # The KV and prefix metrics moved from two s24-4 cards into one
+        # s24-8 card, so their old headings are legitimately gone. Assert the
+        # GAUGE ELEMENTS still exist instead -- that is what actually proves
+        # the metric survived the reorganisation.
+        for gauge in ("g-kv-slot", "g-ph-slot", "kv-abs"):
+            self.assertIn('id="%s"' % gauge, self.html,
+                          "the %s gauge was dropped by the cache merge" % gauge)
+        for heading in ("CACHE: KV OCCUPANCY / PREFIX REUSE",
                         "REQUEST LATENCY", "TTFT", "DECODE",
                         "SCHEDULER PRESSURE", "PREEMPTIONS"):
             self.assertIn(heading, self.html,
