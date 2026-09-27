@@ -149,9 +149,13 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .dual .gauge .gsub{font-size:9px;top:63px}
 .gwrap{display:flex;align-items:center;justify-content:center;height:calc(100% - 24px)}
 /* Caption under a gauge. .gwrap claims calc(100% - 24px) of the card, so a
-   sibling line must come out of that 24px too or it overflows the card. */
-.gwrap.has-cap{height:calc(100% - 42px)}
-.gcap{text-align:center;font:12px/1.3 var(--mono);color:var(--dim);letter-spacing:.02em;padding:0 6px}
+   sibling line must come out of that 24px budget or it overflows the card
+   bottom (measured: 7px, visible outside the border). Fixed 20px line +
+   4px gap, and the gwrap gives up exactly that much. */
+.gwrap.has-cap{height:calc(100% - 24px - 24px)}
+.gcap{height:20px;line-height:20px;flex:none;text-align:center;
+  font-size:10.5px;font-family:var(--font-data);color:var(--gf-dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 /* timeseries */
 .tsbox{display:flex;flex-direction:column;height:100%}
@@ -393,6 +397,10 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     <div class="gwrap"><div id="g-ph-slot"></div></div></div>
   <div class="card s24-8"><h2>TIME TO FIRST TOKEN P50 / P95 / P99 <span class="info" data-tip="per-request latency to the first token. vLLM: histogram percentiles per tick. llama.cpp: instantaneous prompt-seconds gauge (p50=p95=p99).">i</span></h2>
     <div class="tsbox"><canvas id="c-ttft"></canvas><div id="lg-ttft"></div></div></div>
+  <div class="card s24-8"><h2>PREEMPTIONS / MIN <span class="info" data-tip="requests thrown out of the KV cache by the scheduler and redone, per minute. The direct symptom of KV pressure: sustained non-zero means --max-num-seqs or the cache budget is too small for the traffic. Normally flat at zero — any visible bar is worth a look.">i</span></h2>
+    <div class="tsbox"><canvas id="c-preempt"></canvas><div id="lg-preempt"></div></div></div>
+  <div class="card s24-8"><h2>DECODE RATE / END-TO-END LATENCY <span class="info" data-tip="TPOT (time per output token) is the gap BETWEEN tokens once generation has started — it is what makes a response feel fast or sluggish, and is independent of how long the first token took. e2e is the full request wall time. Both from vLLM histograms per tick; absent on backends that publish neither.">i</span></h2>
+    <div class="tsbox"><canvas id="c-tpot"></canvas><div id="lg-tpot"></div></div></div>
   <div class="card s24-8"><h2>REQUEST HOPPER: RUNNING / WAITING / SWAPPED <span class="info" data-tip="continuous-batching scheduler: requests running vs waiting in the queue (gauges). Swapped not exposed.">i</span></h2>
     <div class="tsbox"><canvas id="c-hop"></canvas><div id="lg-hop"></div></div></div>
 </div>
@@ -909,6 +917,26 @@ function seriesKeys(e,hist,d){
     ph:hist?(sr.prefix_hit_rate_window!=null?sr.prefix_hit_rate_window:mean(sr.prefix_hit_rate||[])):(sr.prefix_hit_rate||null),
     sa:hist?(sr.spec_acceptance||[]):(sr.spec_acceptance||[]),
     ttft50:hist?(sr.ttft_p50||[]):(sr.ttft_p50||[]),
+    /* TPOT (inter-token gap) and e2e (full request wall time). Already
+       collected live and stored in the DB, but never projected into the
+       history series or drawn anywhere — TTFT alone only shows how long the
+       wait to the FIRST token, which says nothing about how fast the rest of
+       the response streams. tpot50 doubles as the "single stream" speed:
+       1/tpot is the per-request tok/s a user actually perceives. */
+    tpot50:hist?(sr.tpot_p50||[]):((e.stats&&e.stats.tpot_p50)!=null?[e.stats.tpot_p50]:[]),
+    tpot95:hist?(sr.tpot_p95||[]):((e.stats&&e.stats.tpot_p95)!=null?[e.stats.tpot_p95]:[]),
+    e2e95:hist?(sr.e2e_p95||[]):((e.stats&&e.stats.e2e_p95)!=null?[e.stats.e2e_p95]:[]),
+    /* Perceived single-stream tok/s = 1/tpot. Guard against tpot==0
+       (instantaneous histogram) producing Infinity. */
+    tpsPerStream:null,
+    /* Preemptions: the scheduler throwing a request out of the KV cache and
+       redoing it. This is the direct symptom of KV pressure — a lane losing
+       work because --max-num-seqs or the cache budget is too small — and it
+       was already collected and stored (877 rows on :8001) but never drawn.
+       The rate is normally 0, so plot it as a count with a floor of 1: at a
+       linear scale from 0 any non-zero spike is a full-height bar, which is
+       the point, and an all-zero series still renders as a flat baseline. */
+    preempt:hist?(sr.preempt_per_min||[]):((e.stats&&e.stats.preemptions_per_min)!=null?[e.stats.preemptions_per_min]:[]),
     ttft95:hist?(sr.ttft_p95||[]):(sr.ttft_p95||[]),
     ttft99:hist?(sr.ttft_p99||[]):(sr.ttft_p99||[]),
     ttftInst:hist?null:(sr.ttft||null),
@@ -1019,6 +1047,54 @@ function renderPanels(eng,hist,d){
     var cvT=$('c-ttft');cvT.width=cvT.height=0;
   }
   setLegend('lg-ttft',ttRows);
+  /* TPOT + e2e. tpot95 and e2e95 are not null on the live path (they arrive as
+     scalars, not arrays) so they need normalising into a series before draw().
+     The two are different magnitudes — TPOT is tens of ms, e2e is seconds — so
+     they share a card but each keeps its own axis via the legend rows rather
+     than being plotted on one misleading scale. */
+  var tpRows=null;
+  var toArr=function(v){return v==null?[]:(Array.isArray(v)?v:[v]);};
+  var t50=toArr(K.tpot50),t95=toArr(K.tpot95),e95=toArr(K.e2e95);
+  var hasAny=function(a){return a.length&&a.some(function(v){return v!=null;});};
+  if(hasAny(t50)||hasAny(t95)||hasAny(e95)){
+    var tl=[];
+    if(hasAny(t50)) tl.push({d:t50,c:GREEN,n:'tpot p50'});
+    if(hasAny(t95)) tl.push({d:t95,c:ORANGE,n:'tpot p95'});
+    draw($('c-tpot'),tl.map(function(l){return {data:l.d};}),
+         {min:0,colors:tl.map(function(l){return l.c;})});
+    tpRows=tl.map(function(l){return legendRow(l.n,l.c,l.d,fmtSec);});
+    if(hasAny(e95)){
+      /* e2e in its own block under the chart, not on the same axis: it is
+         typically 10-60x TPOT and would flatten the TPOT trace to a line. */
+      tpRows.push(legendRow('e2e p95',BLUE,e95,fmtSec));
+    }
+    /* The headline a human cares about: how fast one stream actually streams.
+       1/tpot is tok/s for a single request regardless of how many run
+       concurrently, so it is comparable across lanes with different slot
+       counts. */
+    var t50v=lastOf(t50);
+    if(t50v!=null&&t50v>0){
+      tpRows.push({name:'single-stream',color:DIM,last:1/t50v,
+                   mean:null,mx:null,fmt:fmtTps1});
+    }
+  }else{
+    var cvP=$('c-tpot');cvP.width=cvP.height=0;
+  }
+  setLegend('lg-tpot',tpRows);
+  /* preemptions */
+  var pmRows=null;
+  var pArr=K.preempt||[];
+  if(pArr.length&&pArr.some(function(v){return v!=null;})){
+    var pMax=Math.max(1,maxOf(pArr)||0);
+    draw($('c-preempt'),[{data:pArr}],{min:0,max:pMax*1.2,colors:[RED],fill:false});
+    pmRows=[legendRow('preemptions/min',RED,pArr,function(v){
+      return v==null?'–':(Number(v)===0?'0':Number(v).toFixed(2));})];
+  }else{
+    var cvR=$('c-preempt');cvR.width=cvR.height=0;
+    pmRows=[{name:'preemptions/min',color:RED,last:0,mean:0,mx:0,
+             fmt:function(v){return v==null?'–':'0';}}];
+  }
+  setLegend('lg-preempt',pmRows);
   /* hopper */
   if(K.run&&K.run.length){
     var hmx=Math.max(1,maxOf(K.run)||0,maxOf(K.wait)||0);

@@ -3551,7 +3551,7 @@ def api_metrics_history(port, span_s):
         c.close()
     series = {k: [r.get(k) for r in rows] for k in
               ("ts", "out_tps", "in_tps", "kv_pct", "ttft_p50", "ttft_p95",
-               "ttft_p99", "tpot_p95",
+               "ttft_p99", "tpot_p50", "tpot_p95", "e2e_p95",
                "queue_p95", "running", "waiting", "req_per_s",
                "prefix_hit_rate", "spec_acceptance", "preempt_per_min",
                "total_tokens", "finish_per_min", "http_2xx_per_min",
