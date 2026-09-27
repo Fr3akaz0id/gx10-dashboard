@@ -1257,6 +1257,12 @@ def _window_stats(st, window_s):
         "kv_memory_bytes": None,
         "kv_num_blocks": None,
         "kv_block_size": None,
+        # Raw prefix-cache counters (cumulative, engine-level). The derived
+        # percentage is sum/sum over the window; the counts are what a
+        # history view needs to weight the same way instead of averaging
+        # per-sample percentages.
+        "prefix_hits": None,
+        "prefix_queries": None,
     }
     if not pts:
         return res
@@ -1406,8 +1412,20 @@ def _window_stats(st, window_s):
     res["preemptions_per_min"] = round(60.0 * d / dt, 2) if d is not None else None
     h_hits = _delta(_c(first, "vllm:prefix_cache_hits_total"), _c(cur, "vllm:prefix_cache_hits_total"))
     h_qry = _delta(_c(first, "vllm:prefix_cache_queries_total"), _c(cur, "vllm:prefix_cache_queries_total"))
-    if h_hits is not None and h_qry is not None and (h_hits + h_qry) > 0:
-        res["prefix_hit_rate"] = round(100.0 * h_hits / (h_hits + h_qry), 1)
+    if h_hits is not None and h_qry is not None and h_qry > 0:
+        # vllm:prefix_cache_queries_total ALREADY INCLUDES the hits (a hit is
+        # a query that was served from cache), so the denominator is h_qry —
+        # not h_hits + h_qry. Dividing by the sum double-counts every hit:
+        # with 200 hits over 300 queries the correct rate is 66.7%, the
+        # old formula reported 40.0%. The sglang/DS4 branch below already
+        # divided by the query count alone; this one did not.
+        res["prefix_hit_rate"] = round(100.0 * h_hits / h_qry, 1)
+    # Expose the raw counts too: the live ratio above is already correctly
+    # weighted (sum/sum), but the history view only has whatever is stored,
+    # and mean() of per-sample percentages is not the window ratio. These let
+    # _to_db_row persist the counts so history can weight the same way.
+    res["prefix_hits"] = _c(cur, "vllm:prefix_cache_hits_total")
+    res["prefix_queries"] = _c(cur, "vllm:prefix_cache_queries_total")
     # DS4: prefix-cache hit rate from the computed/cached prefill split
     # (ds4_tokens_prefilled_total{kind="cached"} vs kind="computed").
     if res.get("prefix_hit_rate") is None:
@@ -1947,6 +1965,11 @@ def _to_db_row(port, st):
         # (llama.cpp /slots) produce a non-empty map.
         "seat_tps_json": (json.dumps(st.get("slot_tps") or {}, sort_keys=True)
                           or None) if st.get("slot_tps") else None,
+        # Cumulative prefix-cache counters, so the history view can weight a
+        # window by volume (sum(hits)/sum(queries)) instead of averaging
+        # per-sample percentages.
+        "prefix_hits": s.get("prefix_hits"),
+        "prefix_queries": s.get("prefix_queries"),
         "out_tps": s["output_per_s"], "in_tps": s["input_per_s"],
         "total_tps": s["tokens_per_s"], "req_per_s": s["requests_per_s"],
         "ttft_p50": s["ttft_p50"], "ttft_p95": s["ttft_p95"],
@@ -3545,6 +3568,35 @@ def api_metrics_history(port, span_s):
             return None
 
     series["seat_tps"] = [_seat_tps_of(r) for r in rows]
+    # Prefix-cache hit rate, WEIGHTED BY VOLUME. The stored prefix_hit_rate
+    # is a per-sample cumulative-to-cumulative ratio; mean() over samples is
+    # not the window ratio, so an idle-heavy window with a few cached queries
+    # reads as a healthy rate when almost nothing was ever cached. The counts
+    # are cumulative, so the correct per-point value is
+    # hits(i)/queries(i) computed from the counters themselves — which is
+    # exactly what the live path already does.
+    def _prefix_pct(r):
+        q = r.get("prefix_queries")
+        if q is None or not q:
+            return None
+        h = r.get("prefix_hits")
+        if h is None:
+            return None
+        try:
+            return round(100.0 * float(h) / float(q), 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    weighted = [_prefix_pct(r) for r in rows]
+    if any(x is not None for x in weighted):
+        series["prefix_hit_rate"] = weighted
+    # Sum/sum over the whole window, for a single headline number.
+    tot_h = sum(r.get("prefix_hits") or 0 for r in rows
+                if r.get("prefix_hits") is not None)
+    tot_q = sum(r.get("prefix_queries") or 0 for r in rows
+                if r.get("prefix_queries") is not None)
+    series["prefix_hit_rate_window"] = (round(100.0 * tot_h / tot_q, 1)
+                                        if tot_q > 0 else None)
     gpu = {k: [r.get(k) for r in gpu_rows] for k in
            ("ts", "sm_clock_mhz", "temp_c", "power_w", "throttle_active",
             "util_pct", "nvme_c")}

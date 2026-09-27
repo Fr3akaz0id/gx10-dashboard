@@ -18,7 +18,7 @@ SAMPLE_COLS = ["ts", "port", "model", "kv_pct", "running", "waiting",
                "http_4xx_per_min", "prompt_cached_pct",
                "in_tokens", "out_tokens", "slot_cap", "slot_running",
                "kv_capacity_tokens", "kv_used_tokens", "kv_memory_bytes",
-               "seat_tps_json"]
+               "seat_tps_json", "prefix_hits", "prefix_queries"]
 
 GPU_COLS = ["ts", "sm_clock_mhz", "sm_clock_max_mhz", "throttle_active",
             "throttle_sw_thermal_us", "throttle_hw_thermal_us",
@@ -106,6 +106,14 @@ MIGRATE_V2 = [
     # which has no seat axis. Stored so per-seat t/s survives the ring and a
     # restart — in-memory it would only ever be visible for the last hour.
     ("samples", "seat_tps_json", "TEXT"),
+    # Raw prefix-cache hit/query COUNTS alongside the derived percentage.
+    # The percentage alone cannot be re-weighted: mean() of per-sample ratios
+    # is not the window ratio, so a window with one busy query and many idle
+    # polls reads as a healthy hit rate when almost nothing was ever cached.
+    # Storing the counts lets the history view compute sum(hits)/sum(queries),
+    # the same way the live path already does.
+    ("samples", "prefix_hits", "REAL"),
+    ("samples", "prefix_queries", "REAL"),
 ]
 SCHEMA_VERSION = 5
 

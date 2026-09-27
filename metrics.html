@@ -148,6 +148,10 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .dual .gauge .num{font-size:17px;top:37px}
 .dual .gauge .gsub{font-size:9px;top:63px}
 .gwrap{display:flex;align-items:center;justify-content:center;height:calc(100% - 24px)}
+/* Caption under a gauge. .gwrap claims calc(100% - 24px) of the card, so a
+   sibling line must come out of that 24px too or it overflows the card. */
+.gwrap.has-cap{height:calc(100% - 42px)}
+.gcap{text-align:center;font:12px/1.3 var(--mono);color:var(--dim);letter-spacing:.02em;padding:0 6px}
 
 /* timeseries */
 .tsbox{display:flex;flex-direction:column;height:100%}
@@ -383,9 +387,9 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
 <!-- row 2 — cache + latency + concurrency -->
 <div class="row r24" id="row2">
   <div class="card s24-4"><h2>KV CACHE USED <span class="info" data-tip="fraction of the KV cache in use (vllm:kv_cache_usage_perc; llama.cpp used/total from /slots). The line below is the absolute budget — the percentage alone does not say how many tokens of headroom remain.">i</span></h2>
-    <div class="gwrap"><div id="g-kv-slot"></div></div>
-    <div id="kv-abs" class="sub" style="display:none"></div></div>
-  <div class="card s24-4"><h2>PREFIX CACHE HIT % <span class="info" data-tip="cache hits / (hits + queries) over the window — share of prompt tokens served from the prefix cache">i</span></h2>
+    <div class="gwrap has-cap"><div id="g-kv-slot"></div></div>
+    <div id="kv-abs" class="gcap" style="display:none"></div></div>
+  <div class="card s24-4"><h2>PREFIX CACHE HIT % <span class="info" data-tip="cache hits / queries over the window, weighted by volume — queries_total already includes hits, so hits are not added again">i</span></h2>
     <div class="gwrap"><div id="g-ph-slot"></div></div></div>
   <div class="card s24-8"><h2>TIME TO FIRST TOKEN P50 / P95 / P99 <span class="info" data-tip="per-request latency to the first token. vLLM: histogram percentiles per tick. llama.cpp: instantaneous prompt-seconds gauge (p50=p95=p99).">i</span></h2>
     <div class="tsbox"><canvas id="c-ttft"></canvas><div id="lg-ttft"></div></div></div>
@@ -611,6 +615,23 @@ function lastOf(arr){
   if(!arr||!arr.length)return null;
   for(var i=arr.length-1;i>=0;i--)if(arr[i]!=null)return arr[i];
   return null;
+}
+/* Integrate a tok/s RATE series into a cumulative token COUNT per point, so
+   a sparkline can sit under a tile that shows a count. Trapezoidal over the
+   real timestamps; a null or non-increasing timestamp contributes nothing
+   rather than inventing a spike. The final value approximates the window
+   total, which is what the tile shows. */
+function cumSeries(rates,ts){
+  if(!rates||!rates.length)return [];
+  var out=[],acc=0,prevT=null,prevR=null;
+  for(var i=0;i<rates.length;i++){
+    var r=rates[i],t=ts?ts[i]:null;
+    if(r!=null&&prevR!=null&&t!=null&&prevT!=null&&t>prevT)
+      acc+=(r+prevR)/2*(t-prevT);
+    out.push(acc);
+    if(r!=null){prevR=r;prevT=t;}
+  }
+  return out;
 }
 function maxOf(arr){
   if(!arr||!arr.length)return null;
@@ -866,16 +887,26 @@ function renderMeters(d){
 }
 
 /* ── panel data resolution: live vs history keys ─────────── */
-function seriesKeys(e,hist){
+function seriesKeys(e,hist,d){
   var sr=e.series||{};
   return {
+    /* Timestamps ride along the rate series so cumSeries() can integrate a
+       tok/s rate into the COUNT the token tiles display. On the history path
+       the series live in d, not in e. */
+    ts:(hist?((d&&d.series&&d.series.ts)||sr.ts||[]):(sr.ts||[])),
     out:hist?(sr.out_tps||[]):(sr.output_per_s||[]),
     inn:hist?(sr.in_tps||[]):(sr.input_per_s||[]),
     total:hist?(sr.total_tps||sumSeries(sr.in_tps||[],sr.out_tps||[])):sumSeries(sr.input_per_s||[],sr.output_per_s||[]),
     kv:hist?(sr.kv_pct||[]):(sr.kv_pct||[]),
     kv_cap:hist?lastOf(sr.kv_capacity_tokens||[]):(sr.kv_capacity_tokens||null),
     kv_used:hist?lastOf(sr.kv_used_tokens||[]):(sr.kv_used_tokens||null),
-    ph:hist?(sr.prefix_hit_rate||[]):(sr.prefix_hit_rate||[]),
+    /* Volume-weighted, not mean(sr.prefix_hit_rate): the stored series is
+       cumulative hits/queries per point, and averaging those ratios is not
+       the window ratio. A window with one cached query among many idle polls
+       would otherwise read as a healthy hit rate. The API sends the sum/sum
+       figure as prefix_hit_rate_window; the per-point series is already
+       cumulative-ratio so mean() over it is only a fallback. */
+    ph:hist?(sr.prefix_hit_rate_window!=null?sr.prefix_hit_rate_window:mean(sr.prefix_hit_rate||[])):(sr.prefix_hit_rate||null),
     sa:hist?(sr.spec_acceptance||[]):(sr.spec_acceptance||[]),
     ttft50:hist?(sr.ttft_p50||[]):(sr.ttft_p50||[]),
     ttft95:hist?(sr.ttft_p95||[]):(sr.ttft_p95||[]),
@@ -917,7 +948,7 @@ function val(live,histMean){
 /* ── main panel render (in-place updates only) ────────────── */
 var GREEN='#22c55e',ORANGE='#fb923c',RED='#ef4444',GOLD='#eab308',BLUE='#60a5fa',DIM='#9aa3b2';
 function renderPanels(eng,hist,d){
-  var p=eng.port,s=eng.stats||{},K=seriesKeys(eng,hist);
+  var p=eng.port,s=eng.stats||{},K=seriesKeys(eng,hist,d);
   var tok=rangeTokens(eng,hist,d);
   /* row 1 — stats + sparklines */
   setText('st-tok-total',fmtTok(tok.total));
@@ -927,9 +958,15 @@ function renderPanels(eng,hist,d){
   var tpsOut=hist?mean(K.out):((s.output_per_s_now!=null)?s.output_per_s_now:((s.output_per_s!=null)?s.output_per_s:mean(K.out)));
   setText('st-tps-total',fmtTpsInt(tpsTotal));
   setText('st-tps-out',fmtTps1(tpsOut));
-  draw($('spark-tok-total'),[{data:K.total}],{fill:true,colors:[GREEN],min:0});
-  draw($('spark-tok-out'),[{data:K.out}],{fill:true,colors:[GREEN],min:0});
-  draw($('spark-tok-in'),[{data:K.inn}],{fill:true,colors:[GREEN],min:0});
+  /* The three token tiles show COUNTS over the range (tok.total/out/inn),
+     so their sparklines must plot counts too. K.total/out/inn are tok/s
+     RATES — plotting them under a count tile compares two different units,
+     and the shape misleads: a steady high rate looks like a falling count
+     only because the window rolls. Integrate the rate series into a
+     cumulative count per point so the sparkline tracks its own tile. */
+  draw($('spark-tok-total'),[{data:cumSeries(K.total,K.ts)}],{fill:true,colors:[GREEN],min:0});
+  draw($('spark-tok-out'),[{data:cumSeries(K.out,K.ts)}],{fill:true,colors:[GREEN],min:0});
+  draw($('spark-tok-in'),[{data:cumSeries(K.inn,K.ts)}],{fill:true,colors:[GREEN],min:0});
   draw($('spark-tps-total'),[{data:K.total}],{fill:true,colors:[GREEN],min:0});
   draw($('spark-tps-out'),[{data:K.out}],{fill:true,colors:[GREEN],min:0});
   /* row 2 — kv / prefix / ttft / hopper */
@@ -950,7 +987,7 @@ function renderPanels(eng,hist,d){
     $('kv-abs').textContent=usedTxt+fmtTok(kvCap)+' tokens';
     $('kv-abs').style.display='';
   }else{$('kv-abs').style.display='none';}
-  var ph=hist?mean(K.ph):s.prefix_hit_rate;
+  var ph=hist?K.ph:s.prefix_hit_rate;
   setArc('g-ph',ph,'ok',ph==null?'–':Number(ph).toFixed(1)+'%',ph==null?'no traffic':'hits / queries');
   /* ttft chart */
   var ttRows=null;
