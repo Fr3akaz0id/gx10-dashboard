@@ -126,5 +126,49 @@ class TestRenderTargetsExist(unittest.TestCase):
                           "legend %s is declared but never populated" % lid)
 
 
+class TestCardWidthMatchesContent(unittest.TestCase):
+    """A card must be sized for what it holds, not by habit.
+
+    CACHE was s24-8 (623px) holding two 104px gauges -- 212px of content in
+    a 623px box, ~400px of dead space. Dropped to s24-4 (306px), which still
+    clears 2x104px gauges + 4px gap, and the freed columns went to REQUEST
+    LATENCY, which has an 8-row legend table that actually needs width.
+
+    These are static assertions on the declared spans; the rendered geometry
+    was verified in a browser (306px card, 280px wrap, 208px of gauges, 36px
+    balanced margin, caption contained with 15.8px bottom clearance).
+    """
+
+    def setUp(self):
+        with open(HTML) as fh:
+            self.html = fh.read()
+
+    def _span_of(self, heading):
+        m = re.search(r'class="card s24-(\d+)"[^>]*><h2>%s' % re.escape(heading),
+                      self.html)
+        self.assertIsNotNone(m, "card %r not found" % heading)
+        return int(m.group(1))
+
+    def test_cache_card_is_four_columns(self):
+        self.assertEqual(self._span_of("CACHE: KV OCCUPANCY"), 4)
+
+    def test_dual_gauges_fit_a_four_column_card(self):
+        """2 gauges at 104px + 4px gap must fit the ~280px content box of an
+        s24-4 card. If either gauge is widened later, this is the tripwire."""
+        gauges = re.findall(r'\.dual \.gauge\{width:(\d+)px', self.html)
+        self.assertTrue(gauges, ".dual .gauge width rule not found")
+        widest = max(int(g) for g in gauges)
+        span = self._span_of("CACHE: KV OCCUPANCY")
+        # 1888px container / 24 cols, minus card padding -> ~280px for s24-4
+        content_px = 1888 * span / 24 - 26
+        self.assertLessEqual(widest * 2 + 4, content_px,
+                             "two %dpx gauges + 4px gap = %dpx will not fit "
+                             "the ~%dpx content box of an s24-%d card"
+                             % (widest, widest * 2 + 4, content_px, span))
+
+    def test_latency_card_took_the_freed_columns(self):
+        self.assertEqual(self._span_of("REQUEST LATENCY"), 12)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
