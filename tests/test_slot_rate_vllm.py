@@ -1,9 +1,16 @@
-"""vLLM measured per-seat rate: the SLOTS card stamps a MEASURED per-request
-tok/s on busy seats (from the request completion histograms diffed over a
-trailing window) instead of the aggregate÷running estimate, while a quiet
-vLLM lane (or sglang/ds4) keeps the estimate path. Pure in-memory: no
-network, no DB, no side effects."""
+"""vLLM measured per-REQUEST rate: the lane-wide mean over requests that
+completed in a trailing window, from the request completion histograms.
+
+This rate used to be stamped into every busy SEAT with src="req". That was
+wrong and is gone: the value is one fleet-wide mean, identical for every
+in-flight request, so four tiles each reading "30.0 tok/s" would look like four
+independent measurements. The rate is still computed and still published -- as
+req_rate, rendered as a lane figure -- it simply never lands in a seat tile.
+
+Pure in-memory: no network, no DB, no side effects."""
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
 from _bootstrap import D
 W = D.VLLM_SLOT_RATE_WINDOW_S
@@ -52,34 +59,40 @@ def test_measured_over_completed_requests():
         (1004.0, _hist(1300.0, 40.0, n=2)),
         (1009.0, _hist(1600.0, 50.0, n=3)),          # newest
     ])
-    tps, n = D._vllm_measured_seat_rate(_st(ring))
+    tps, n = D._vllm_measured_req_rate(_st(ring))
     assert tps == 30.0 and n == 2, (tps, n)
+    # The measurement is published for the LANE...
     ls = D._live_slot_state(_st(ring))
-    assert ls["src"] == "req" and ls["busy"] == [30.0], ls
+    assert ls["req_rate"] == 30.0 and ls["req_n"] == 2, ls
+    # ...and is NOT handed to a seat. src stays None and every busy seat is
+    # None, because a fleet mean in a seat tile reads as a per-seat
+    # measurement. Guarded by tests/test_seat_honesty.py too.
+    assert ls["src"] is None, ls
+    assert ls["busy"] == [None], ls
 
 
 def test_stays_lit_under_sustained_decode():
     # The regressed behaviour: completions are sparse per-tick but continuous
     # over the window. A tick with no NEW completion must STILL show the
-    # measured rate (not drop to None/estimate), so the card doesn't strobe.
+    # measured rate (not drop to None), so the card doesn't strobe.
     ring = _ring([
         (1000.0, _hist(1000.0, 40.0, n=2)),          # window start, gen/dec=25
         (1002.0, _hist(1000.0, 40.0, n=2)),          # no completion this tick
         (1004.0, _hist(1000.0, 40.0, n=2)),          # still none
         (1008.0, _hist(1200.0, 48.0, n=4)),          # newest: +200 / +8 = 25
     ])
-    tps, n = D._vllm_measured_seat_rate(_st(ring))
+    tps, n = D._vllm_measured_req_rate(_st(ring))
     assert tps == 25.0 and n == 2, (tps, n)
 
 
-def test_truly_quiet_lane_falls_back_to_estimate():
+def test_truly_quiet_lane_reports_no_rate():
     # No completions anywhere across the whole window -> nothing to stamp.
     ring = _ring([
         (1000.0, _hist(5000.0, 150.0, n=9)),
         (1003.0, _hist(5000.0, 150.0, n=9)),
         (1006.0, _hist(5000.0, 150.0, n=9)),
     ])
-    assert D._vllm_measured_seat_rate(_st(ring)) == (None, 0)
+    assert D._vllm_measured_req_rate(_st(ring)) == (None, 0)
     ls = D._live_slot_state(_st(ring))
     assert ls["src"] is None and ls["busy"] == [None], ls
 
@@ -88,7 +101,7 @@ def test_too_thin_window_rejected():
     # Only one sample inside the window (span < 1s) is not trustworthy.
     ring = _ring([(1000.0, _hist(1000.0, 40.0)),
                   (1000.5, _hist(1200.0, 48.0))])
-    assert D._vllm_measured_seat_rate(_st(ring)) == (None, 0)
+    assert D._vllm_measured_req_rate(_st(ring)) == (None, 0)
 
 
 def test_restart_reset_rejected():
@@ -98,15 +111,16 @@ def test_restart_reset_rejected():
         (1004.0, _hist(300.0, 9.0, n=1)),
         (1008.0, _hist(360.0, 11.0, n=2)),
     ])
-    assert D._vllm_measured_seat_rate(_st(ring)) == (None, 0)
+    assert D._vllm_measured_req_rate(_st(ring)) == (None, 0)
 
 
 def test_no_histograms_is_not_vllm():
-    # sglang/ds4-style sample with no request_* histograms -> estimate path.
+    # sglang/ds4-style sample with no request_* histograms -> no rate, and
+    # still no seat source, and no fallback to fake one.
     s = {"gauges": {"vllm:num_requests_running": {"value": 1.0, "labels": {}}},
          "counters": {}, "histograms": {}}
     ring = _ring([(1000.0, s), (1004.0, s), (1008.0, s)])
-    assert D._vllm_measured_seat_rate(_st(ring)) == (None, 0)
+    assert D._vllm_measured_req_rate(_st(ring)) == (None, 0)
     assert D._live_slot_state(_st(ring))["src"] is None
 
 
@@ -127,4 +141,4 @@ if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             fn(); print(f"ok {name}")
-    print("all vLLM per-seat rate tests passed")
+    print("all vLLM per-request rate tests passed")

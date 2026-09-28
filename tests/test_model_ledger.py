@@ -7,7 +7,6 @@ In-memory DB, no dashboard imports needed for the metadb half; the
 dashboard identity helpers are tested with faked proc/args.
 """
 import os, sys, time
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import metadb
 
@@ -125,7 +124,6 @@ c.close()
 # ── dashboard identity helpers ────────────────────────────────
 import _bootstrap  # noqa: F401  (must precede dashboard: isolates log + DB)
 from _bootstrap import dashboard
-import metadb
 # shard stripping
 assert dashboard._strip_shards("Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004") == "Qwen3.8-Flash-Next-UD-Q4_K_XL"
 assert dashboard._strip_shards("plain-name") == "plain-name"
@@ -139,13 +137,18 @@ try:
     # composite key structure
     ident = dashboard._model_identity(8003, {"model_live": "qwen3.8-27b", "port": 8003})
     assert ident["model"] == "qwen3.8-27b", ident
-    assert ident["engine"] == "sglang:8003", ident
-    assert ident["key"] == K("qwen3.8-27b", ident["version"], "sglang:8003"), ident
+    # The engine label is the FAMILY, not "family:port" -- the port is not
+    # part of a model's identity (see tests/test_ledger_key_no_port.py). The
+    # endpoint is tracked per-port in model_watermarks/ledger/samples.
+    assert ident["engine"] == "sglang", ident
+    assert ident["key"] == K("qwen3.8-27b", ident["version"], "sglang"), ident
+    assert "8003" not in ident["key"], ident
     # llama.cpp: no model_live -> model_cmdline basename drives the base
     dashboard._live_backend = lambda port, st, cfg: ("llama", None)
     ident = dashboard._model_identity(8888, {"model_cmdline": "SomeModel-Q4_K_M.gguf", "port": 8888})
     assert ident["model"] == "SomeModel-Q4_K_M", ident
-    assert ident["engine"] == "llama:8888", ident
+    assert ident["engine"] == "llama", ident
+    assert "8888" not in ident["key"], ident
 finally:
     dashboard._live_backend = _orig_lb
 

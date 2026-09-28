@@ -21,7 +21,9 @@ is why the cards read ~5 tok/s while the lane did 40.
 
 So: the AGGREGATE live rate comes from the counter delta. The HISTOGRAM
 keeps a different job — tokens ÷ decode-time per completed request, which
-is the per-request speed reported per seat (_vllm_measured_seat_rate).
+is the lane-wide per-request speed (_vllm_measured_req_rate). It is NOT
+    reported per seat: vLLM has no seat axis, so stamping this mean on each
+    slot would present a fleet average as N independent measurements.
 Both are tested here; the two must not be conflated.
 
 Pure in-memory. See tests/test_live_tps_accuracy.py for the accuracy

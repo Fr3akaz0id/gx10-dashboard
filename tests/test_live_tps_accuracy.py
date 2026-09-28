@@ -153,7 +153,7 @@ class TestPerRequestRateIsSeparate(unittest.TestCase):
 
     DECODING = TestLiveRateUsesTheCounter.DECODING
 
-    def test_seat_rate_uses_histogram_not_counter(self):
+    def test_request_rate_uses_histogram_not_counter(self):
         """Once requests DO complete, per-request tok/s comes from the
         histogram. The aggregate live rate comes from the counter. They are
         different measurements and must not be conflated."""
@@ -165,16 +165,16 @@ class TestPerRequestRateIsSeparate(unittest.TestCase):
             (2345, 1000, 1812, 7, 100.0),
             (2412, 1000, 2412, 8, 115.0),   # request completed: +600 gen
         ])
-        rate, n = D._vllm_measured_seat_rate(st)
+        rate, n = D._vllm_measured_req_rate(st)
         self.assertIsNotNone(rate, "per-request rate must be measurable")
         # 600 output tokens over 15s of decode time
         self.assertAlmostEqual(rate, 600 / 15.0, delta=0.5)
         self.assertEqual(n, 1)
 
-    def test_no_completions_yields_no_seat_rate(self):
+    def test_no_completions_yields_no_request_rate(self):
         """Mid-decode with nothing finished: the per-REQUEST number is
         genuinely unmeasurable, and must be None rather than the aggregate."""
-        rate, n = D._vllm_measured_seat_rate(self.DECODING)
+        rate, n = D._vllm_measured_req_rate(self.DECODING)
         self.assertIsNone(rate)
         self.assertEqual(n, 0)
 

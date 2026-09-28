@@ -1,0 +1,873 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>gx10 · statistics · dgx spark</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+/* ── base ─────────────────────────────────────────────────── */
+*{box-sizing:border-box;margin:0}
+html{
+  /* Grafana dark palette (fixed on this page — it is the Grafana clone) */
+  --gf-bg:#0b0f14;
+  --gf-bg2:#111827;
+  --gf-card:#141a22;
+  --gf-card2:#1a2332;
+  --gf-edge:#2a3344;
+  --gf-txt:#e5e9f0;
+  --gf-dim:#9aa3b2;
+  --gf-green:#22c55e;
+  --gf-bright:#4ade80;
+  --gf-gold:#eab308;
+  --gf-orange:#fb923c;
+  --gf-red:#ef4444;
+  --gf-blue:#60a5fa;
+  --gf-track:#1f2733;
+  --radius:10px;
+  --font-ui:'Segoe UI',system-ui,-apple-system,sans-serif;
+  --font-data:ui-monospace,'Cascadia Mono',Menlo,Consolas,monospace;
+}
+html,body{min-height:100%}
+body{
+  background:linear-gradient(180deg,var(--gf-bg) 0%,var(--gf-bg2) 100%) fixed;
+  color:var(--gf-txt);
+  font:13px/1.45 var(--font-ui);
+  padding:14px 16px 12px;
+}
+
+/* ── header ───────────────────────────────────────────────── */
+header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wrap}
+.brand{font-size:16px;font-weight:700;letter-spacing:.4px;display:flex;align-items:center;gap:9px;white-space:nowrap}
+.brand b{color:var(--gf-bright);font-weight:800}
+.tabs{display:flex;gap:5px}
+.tab{font-size:11.5px;padding:4px 12px;border-radius:16px;border:1px solid var(--gf-edge);
+  color:var(--gf-dim);text-decoration:none;letter-spacing:.3px;transition:all .2s}
+.tab:hover{color:var(--gf-txt)}
+.tab.on{color:var(--gf-bright);border-color:color-mix(in srgb,var(--gf-green) 45%,transparent);
+  background:color-mix(in srgb,var(--gf-green) 10%,transparent)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--gf-green);
+  border:1px solid color-mix(in srgb,var(--gf-green) 40%,transparent);border-radius:16px;padding:2px 10px;white-space:nowrap}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--gf-green);animation:pulse 2s infinite}
+.live.bad{color:var(--gf-red);border-color:color-mix(in srgb,var(--gf-red) 40%,transparent)}
+.live.bad i{background:var(--gf-red);animation:none}
+@keyframes pulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--gf-green) 45%,transparent)}70%{box-shadow:0 0 0 7px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.rr{font-size:10.5px;color:var(--gf-dim);letter-spacing:.4px;white-space:nowrap}
+
+/* window picker (segmented — no native select element) */
+.seg{display:flex;border:1px solid var(--gf-edge);border-radius:16px;overflow:hidden}
+.seg button{appearance:none;background:transparent;border:none;color:var(--gf-dim);cursor:pointer;
+  font:11px var(--font-data);padding:4px 11px;letter-spacing:.3px;transition:all .15s}
+.seg button+button{border-left:1px solid var(--gf-edge)}
+.seg button:hover{color:var(--gf-txt)}
+.seg button.on{color:var(--gf-bright);background:color-mix(in srgb,var(--gf-green) 12%,transparent)}
+
+/* engine strip */
+.engstrip{display:flex;align-items:center;gap:10px;margin-bottom:10px;min-height:24px;flex-wrap:wrap}
+.edot{width:9px;height:9px;border-radius:50%;background:var(--gf-green);flex:none;
+  box-shadow:0 0 8px var(--gf-green);animation:pulse 2.4s infinite}
+.edot.off{background:#556;box-shadow:none;animation:none}
+.ename{font-family:var(--font-data);font-size:12.5px;font-weight:700;letter-spacing:.3px}
+.epill{font-size:10px;font-family:var(--font-data);padding:2px 9px;border-radius:12px;
+  border:1px solid var(--gf-edge);color:var(--gf-dim);letter-spacing:.4px}
+.epill.on{color:var(--gf-green);border-color:color-mix(in srgb,var(--gf-green) 45%,transparent)}
+.epill.off{color:var(--gf-red);border-color:color-mix(in srgb,var(--gf-red) 45%,transparent)}
+.eback{font-size:9.5px;font-family:var(--font-data);font-weight:700;letter-spacing:.8px;
+  padding:2px 8px;border-radius:12px;border:1px solid;flex:none}
+.eback.llama{color:var(--gf-blue);border-color:color-mix(in srgb,var(--gf-blue) 50%,transparent)}
+.eback.vllm{color:var(--gf-orange);border-color:color-mix(in srgb,var(--gf-orange) 50%,transparent)}
+.eback.sglang{color:var(--gf-gold);border-color:color-mix(in srgb,var(--gf-gold) 50%,transparent)}
+.eback.ds4{color:#c678dd;border-color:color-mix(in srgb,#c678dd 50%,transparent)}
+.eback.unknown{color:var(--gf-dim);border-color:var(--gf-edge)}
+.tmute{color:var(--gf-dim);font-size:11px}
+
+/* ── rows & cards ─────────────────────────────────────────── */
+.row{display:grid;gap:10px;margin-bottom:10px}
+.r24{grid-template-columns:repeat(24,1fr)}
+.r15{grid-template-columns:repeat(15,1fr)}
+.s24-4{grid-column:span 4}
+.s24-8{grid-column:span 8}
+.s24-12{grid-column:span 12}
+.s24-16{grid-column:span 16}
+.s15-3{grid-column:span 3}
+.card{
+  background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:10px 12px;min-width:0;
+}
+.card h2{font-size:10.5px;text-transform:uppercase;letter-spacing:1.6px;color:var(--gf-dim);
+  display:flex;align-items:center;gap:7px;margin-bottom:8px;font-weight:600;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.info{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;flex:none;
+  border:1px solid var(--gf-edge);border-radius:50%;font-size:8.5px;font-style:normal;color:var(--gf-dim);
+  cursor:help;font-family:var(--font-ui);transition:all .15s}
+.info:hover{border-color:var(--gf-blue);color:var(--gf-blue)}
+#infotip{position:fixed;z-index:100;max-width:300px;padding:7px 10px;border-radius:8px;
+  background:var(--gf-card2);border:1px solid var(--gf-edge);box-shadow:0 8px 28px rgba(0,0,0,.5);
+  font-size:11px;line-height:1.45;color:var(--gf-txt);pointer-events:none;opacity:0;transition:opacity .12s}
+#infotip.on{opacity:1}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.row>.card{animation:rise .4s both}
+
+/* row 0 — cost strip */
+#row-cost,#row-meter,#row-at-meter{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.tile{background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:9px 14px;animation:rise .4s both}
+.tile .tt{font-size:10px;text-transform:uppercase;letter-spacing:1.4px;color:var(--gf-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .tv{font-family:var(--font-data);font-size:24px;font-weight:700;line-height:1.25;color:var(--gf-gold)}
+.tile.energy .tv{color:var(--gf-bright)}
+.tile .ts{font-size:10px;color:var(--gf-dim);font-family:var(--font-data);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* row 1 — stat + sparkline cards */
+#row1 .stat{background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:9px 12px 6px;animation:rise .4s both;display:flex;flex-direction:column;min-height:126px}
+#row1 .st-t{font-size:10px;text-transform:uppercase;letter-spacing:1.3px;color:var(--gf-dim);
+  display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden}
+#row1 .st-v{font-family:var(--font-data);font-size:25px;font-weight:700;color:var(--gf-bright);
+  line-height:1.3;margin-top:2px;white-space:nowrap}
+#row1 .st-v small{font-size:12px;color:var(--gf-dim);font-weight:400;margin-left:2px}
+#row1 .st-s{font-size:9.5px;color:var(--gf-dim);margin-top:auto;padding-top:2px}
+.spark{width:100%;height:34px;display:block;margin-top:4px}
+
+/* row 2 — gauges + timeseries */
+.gauge{position:relative;width:150px;height:120px;flex:none}
+.gauge svg{width:150px;height:120px;display:block}
+.gauge .track{fill:none;stroke:var(--gf-track);stroke-width:9}
+.gauge .v{fill:none;stroke-width:9;stroke-dasharray:0 100;
+  transition:stroke-dasharray .7s cubic-bezier(.4,0,.2,1)}
+.gauge .v0{stroke:var(--gf-green)}
+.gauge .v1{stroke:var(--gf-gold)}
+.gauge .v2{stroke:var(--gf-red)}
+.gauge .num{position:absolute;left:0;right:0;top:52px;text-align:center;
+  font-family:var(--font-data);font-size:26px;font-weight:700}
+.gauge .gsub{position:absolute;left:0;right:0;top:84px;text-align:center;
+  font-size:11px;color:var(--gf-dim);text-transform:uppercase;letter-spacing:1px;
+  white-space:pre-line}
+.dual{display:flex;justify-content:space-around;align-items:center;height:100%;gap:4px}
+.dual .gauge{width:104px;height:87px}
+.dual .gauge svg{width:104px;height:87px}
+.dual .gauge .num{font-size:17px;top:37px}
+.dual .gauge .gsub{font-size:9px;top:63px}
+.gwrap{display:flex;align-items:center;justify-content:center;height:calc(100% - 24px)}
+/* Caption under a gauge. .gwrap claims calc(100% - 24px) of the card, so a
+   sibling line must come out of that 24px budget or it overflows the card
+   bottom (measured: 7px, visible outside the border). Fixed 20px line +
+   4px gap, and the gwrap gives up exactly that much. */
+.gwrap.has-cap{height:calc(100% - 24px - 24px)}
+.gcap{height:20px;line-height:20px;flex:none;text-align:center;
+  font-size:10.5px;font-family:var(--font-data);color:var(--gf-dim);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* timeseries */
+.tsbox{display:flex;flex-direction:column;height:100%}
+.tsbox canvas{width:100%;height:104px;display:block}
+.tsbox.tall canvas{height:120px}
+.lg{width:100%;border-collapse:collapse;margin-top:7px;font-size:10px;font-family:var(--font-data)}
+.lg th{font-weight:400;color:var(--gf-dim);text-align:right;padding:2px 6px 1px;
+  border-bottom:1px solid var(--gf-edge);font-size:9px;text-transform:uppercase;letter-spacing:.8px}
+.lg th:first-child{text-align:left}
+.lg td{padding:2.5px 6px;text-align:right;color:var(--gf-txt)}
+.lg td:first-child{text-align:left;color:var(--gf-dim);white-space:nowrap}
+.lg td i{display:inline-block;width:9px;height:3px;border-radius:2px;margin-right:5px;vertical-align:middle}
+.lg .dim{color:var(--gf-dim)}
+
+/* row 4 — spec decode by position */
+.sprow{display:flex;align-items:center;gap:8px;margin-top:7px}
+.sprow .spl{width:auto;max-width:74px;flex:none;font-size:10px;color:var(--gf-dim);font-family:var(--font-data);
+  text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sprow .spt{flex:1;height:12px;background:var(--gf-track);border-radius:3px;overflow:hidden}
+.sprow .spt.bare{display:none}
+.sprow .spb{display:block;height:100%;background:var(--gf-green);border-radius:3px;
+  transition:width .7s cubic-bezier(.4,0,.2,1)}
+.sprow .spv{width:64px;flex:none;text-align:right;font-size:11px;font-weight:600;
+  font-family:var(--font-data);color:var(--gf-green)}
+.spempty{color:var(--gf-dim);font-size:11px;font-style:italic;padding:10px 2px}
+/* journal branch — non-bar stats in a compact 2-col grid (no empty tracks) */
+.spgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 18px;margin-top:14px}
+.spgrid .sptile{display:flex;justify-content:space-between;align-items:baseline;gap:10px;
+  border-bottom:1px solid var(--gf-track);padding-bottom:3px}
+.spgrid .sptile .k{color:var(--gf-dim);font-size:10px;text-transform:uppercase;letter-spacing:.8px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spgrid .sptile .v{font-family:var(--font-data);font-weight:600;color:var(--gf-bright);
+  font-size:12.5px;white-space:nowrap}
+
+/* engine note (down / no metrics) */
+.note{padding:14px 16px;border-radius:var(--radius);border:1px dashed var(--gf-edge);
+  color:var(--gf-dim);font-size:12.5px;line-height:1.6}
+.note b{color:var(--gf-txt)}
+.note .mono{font-family:var(--font-data);color:var(--gf-blue)}
+
+/* gb10 hardware detail (kept from prior page) */
+.gpu-detail{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px}
+@media(max-width:900px){.gpu-detail{grid-template-columns:1fr}}
+.gd-row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 2px;
+  border-bottom:1px solid color-mix(in srgb,var(--gf-txt) 7%,transparent);font-size:12px}
+.gd-row:last-child{border-bottom:none}
+.gd-row .k{color:var(--gf-dim)}
+.gd-row .v{font-family:var(--font-data);font-weight:600}
+.gd-row .v small{color:var(--gf-dim);font-weight:400;font-size:11px}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;justify-content:center}
+.tpill{font-size:10px;font-family:var(--font-data);padding:3px 10px;border-radius:14px;
+  border:1px solid var(--gf-edge);color:var(--gf-dim);letter-spacing:.3px}
+.tpill.active{color:var(--gf-red);border-color:color-mix(in srgb,var(--gf-red) 50%,transparent);
+  background:color-mix(in srgb,var(--gf-red) 10%,transparent)}
+.throttles{margin-top:9px;display:flex;flex-direction:column;gap:4px}
+.throttle{display:flex;justify-content:space-between;font-size:11.5px}
+.throttle .k{color:var(--gf-dim)}
+.throttle .v{font-family:var(--font-data);font-weight:600}
+.throttle .v.hot{color:var(--gf-red)}
+.gauges4{display:flex;gap:14px;margin:2px 0 10px;flex-wrap:wrap}
+/* GB10 detail card: 8 gauges in a 2x4 grid (works at any width) */
+.gauges4.hw2x2{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 10px;
+  justify-items:center;margin:2px 0 12px}
+.gauges4.hw2x2 .gauge{width:100%;max-width:150px;height:136px;display:flex;flex-direction:column;align-items:center}
+.gauges4.hw2x2 .glbl{height:16px;line-height:16px;text-align:center;
+  font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;
+  color:var(--gf-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gauges4.hw2x2 .gauge svg{width:100%;max-width:150px}
+.gauges4.hw2x2 .gauge .num{font-size:19px;top:60px}
+.gauges4.hw2x2 .gauge .gsub{font-size:8.5px;top:90px}
+.chartgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:1100px){.chartgrid{grid-template-columns:repeat(2,1fr)}}
+/* top hardware over-time charts (2x2, beside the GB10 gauge card) */
+.hw2{display:grid;grid-template-columns:repeat(2,1fr);gap:10px 14px;height:100%}
+.hw2 .chart-box{min-width:0}
+.hw2 .chart-head{margin-bottom:2px}
+.hw2 .chart-head .lbl{font-size:9px}
+.hw2 .chart-val{font-size:13px}
+.hw2 canvas{width:100%;height:calc(50% - 26px);min-height:44px;display:block;cursor:crosshair}
+/* hover popup: value at the hovered moment across all four charts */
+#hwtip{position:fixed;z-index:50;pointer-events:none;display:none;min-width:150px;
+  background:color-mix(in srgb,var(--gf-card) 92%,transparent);
+  border:1px solid var(--gf-edge);border-radius:8px;padding:7px 9px;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);backdrop-filter:blur(6px);font-family:var(--font-data)}
+#hwtip .tht{font-size:9.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--gf-dim);margin-bottom:5px}
+#hwtip .thr{display:flex;align-items:center;gap:6px;font-size:11px;padding:1px 0}
+#hwtip .thr i{width:8px;height:3px;border-radius:2px;display:inline-block;flex:none}
+#hwtip .thr .k{color:var(--gf-dim);flex:1;font-family:var(--font-ui);font-size:10px}
+#hwtip .thr .v{font-weight:700;color:var(--gf-bright);white-space:nowrap}
+.chart-box:hover .hwc{cursor:crosshair}
+/* top GB10 row: detail card (left) + over-time charts (right) */
+.rowhw{grid-template-columns:minmax(320px,5fr) minmax(0,5fr) minmax(290px,4.5fr)}
+@media(max-width:1200px){.rowhw{grid-template-columns:minmax(300px,1fr) minmax(0,1fr)}
+  .rowhw .slotcard{grid-column:1/-1}}
+/* SLOTS card: live seat tiles + occupancy over the window (single lane) */
+.slotcard{display:flex;flex-direction:column}
+.slotseats{display:flex;gap:7px;align-items:stretch;flex-wrap:wrap;min-height:58px}
+.slottile{position:relative;flex:1 1 54px;max-width:90px;min-height:58px;border-radius:8px;
+  border:1px solid var(--gf-edge);background:var(--gf-card2);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  transition:border-color .3s,background .3s}
+.slottile .sl{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gf-dim)}
+.slottile .sv{font-size:15px;font-weight:700;font-family:var(--font-data);line-height:1.1}
+.slottile .su{font-size:9px;color:var(--gf-dim);font-family:var(--font-data)}
+.slottile.busy{border-color:color-mix(in srgb,var(--gf-green) 55%,transparent);
+  background:color-mix(in srgb,var(--gf-green) 10%,var(--gf-card2))}
+.slottile.busy .sv{color:var(--gf-bright)}
+.slottile.busy .sl{color:color-mix(in srgb,var(--gf-green) 70%,var(--gf-dim))}
+.slottile:not(.busy) .sv{color:var(--gf-dim);opacity:.4;font-size:10.5px;letter-spacing:.5px}
+.slotqueue{align-self:center;font-size:10.5px;font-family:var(--font-data);
+  color:var(--gf-gold);border:1px solid color-mix(in srgb,var(--gf-gold) 45%,transparent);
+  border-radius:14px;padding:3px 10px;white-space:nowrap}
+.slotqueue.idle{color:var(--gf-dim);border-color:var(--gf-edge)}
+.slotchart{flex:1;min-height:56px;display:flex;flex-direction:column;margin-top:9px;min-width:0}
+.slotchart canvas{flex:1;width:100%;min-height:44px;display:block}
+.slotchart .chart-head{margin-bottom:2px}
+.slotkpi{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.slotkpi .kchip{font-size:10px;color:var(--gf-dim);border:1px solid var(--gf-edge);
+  border-radius:14px;padding:2px 9px;font-family:var(--font-data);white-space:nowrap}
+.slotkpi .kchip b{color:var(--gf-txt);font-weight:700}
+.slotkpi .kchip.sat b{color:var(--gf-gold)}
+#slot-tip{position:fixed;z-index:50;pointer-events:none;display:none;min-width:150px;
+  background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:8px;
+  padding:8px 10px;box-shadow:0 8px 28px rgba(0,0,0,.5)}
+#slot-tip .tht{font-size:9.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--gf-dim);margin-bottom:5px}
+#slot-tip .thr{display:flex;align-items:center;gap:6px;font-size:11px;padding:1px 0}
+#slot-tip .thr i{width:8px;height:3px;border-radius:2px;display:inline-block;flex:none}
+#slot-tip .thr .k{color:var(--gf-dim)}
+#slot-tip .thr .v{font-family:var(--font-data);font-weight:600;margin-left:auto}
+@media(max-width:900px){.rowhw{grid-template-columns:1fr}}
+.chart-box{min-width:0}
+.chart-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:3px}
+.chart-head .lbl{font-size:9.5px;text-transform:uppercase;letter-spacing:1.2px;color:var(--gf-dim)}
+.chart-val{font-size:15px;font-weight:700;font-family:var(--font-data)}
+canvas.hwc{width:100%;height:64px;display:block}
+.foot{margin-top:12px;color:var(--gf-dim);opacity:.65;font-size:10.5px;display:flex;
+  justify-content:space-between;flex-wrap:wrap;gap:8px}
+@media(max-width:1200px){
+  .r24{grid-template-columns:repeat(12,1fr)}
+  .s24-4,.s24-8{grid-column:span 12!important}
+  .r15{grid-template-columns:repeat(5,1fr)}
+  .s15-3{grid-column:span 5!important}
+  .gauges4.hw2x2{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #row-cost{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:760px){
+  .r24,.r15,#row-cost{grid-template-columns:repeat(2,1fr)}
+  .s15-3,.s24-4,.s24-8,.s24-5,.s24-6{grid-column:span 2!important}
+}
+body.no-engage #row0,body.no-engage #row1{display:none}
+
+/* ── statistics page ─────────────────────────────────────── */
+.tiles{display:flex;flex-wrap:wrap;gap:12px;padding:0 14px 14px}
+/* The shared .tile rule animates on INSERT. Statistics rebuilds tile markup
+   on every poll, so that animation replayed every 15s as a fade+slide. Apply
+   it once via a class the first render adds, never on a later update. */
+.tiles.first .tile{animation:rise .4s both}
+.tiles .tile{animation:none}
+.bars.first .barrow{animation:rise .4s both}
+.bars .barrow{animation:none}
+.barrow{animation:none}
+.bars{padding:2px 14px 12px;display:flex;flex-direction:column;gap:7px}
+.barrow{display:flex;align-items:center;gap:9px;min-width:0}
+.barlab{flex:0 0 30%;max-width:220px;font-size:10.5px;font-family:var(--font-data);
+  color:var(--gf-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bartrack{flex:1 1 auto;height:9px;background:var(--gf-track);border-radius:5px;overflow:hidden;min-width:40px}
+.barfill{height:100%;border-radius:5px}
+.barval{flex:0 0 auto;font-family:var(--font-data);font-size:10.5px;color:var(--gf-txt);white-space:nowrap}
+.pill{display:inline-block;font-size:9px;letter-spacing:1px;text-transform:uppercase;
+  border:1px solid var(--gf-edge);border-radius:9px;padding:1px 7px;margin-bottom:4px}
+.livepill{color:var(--gf-bright);border-color:var(--gf-bright)}
+.cov{margin-top:3px}
+.tsbox{position:relative;height:150px}
+.tsbox canvas{position:absolute;inset:0;width:100%;height:100%}
+#lg-lanes{display:flex;flex-wrap:wrap;gap:4px 10px;padding:4px 2px 0;font-size:10px;
+  color:var(--gf-dim);font-family:var(--font-data)}
+.lg{display:inline-flex;align-items:center;gap:5px;max-width:100%}
+.lg i{width:9px;height:2px;border-radius:2px;display:inline-block;flex:none}
+.modal-ov{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;
+  justify-content:center;z-index:50}
+.modal{background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
+  padding:16px 18px;max-width:460px}
+.modal h3{font-size:13px;margin-bottom:8px}
+.modal p{margin-bottom:6px;white-space:normal}
+.mact{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+.mbtn{background:var(--gf-card2);border:1px solid var(--gf-edge);color:var(--gf-txt);
+  border-radius:6px;padding:5px 13px;font-size:11.5px;cursor:pointer}
+.mbtn.danger{border-color:var(--gf-red);color:var(--gf-red)}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:60;
+  background:var(--gf-card2);border:1px solid var(--gf-edge);border-radius:8px;
+  padding:8px 14px;font-size:11.5px;font-family:var(--font-data)}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><b>gx10</b></div>
+  <div class="tabs">
+    <a class="tab" href="/metrics">metrics</a>
+    <a class="tab" href="/engines">engines</a>
+    <a class="tab on" href="/statistics">statistics</a>
+    <a class="tab" href="/settings">settings</a>
+  </div>
+  <div class="live" id="live"><i></i>live</div>
+  <span class="rr">all-time · ledger</span>
+</header>
+<div class="row r24" id="row-sum">
+  <div class="card s24-4"><h2>LANES TRACKED <span class="info" data-tip="One lane is one (model, version, engine) triple on a port. The same model on two ports counts twice, because the token counters are separate. This is why a model can appear on two cards.">i</span></h2>
+    <div class="tv" id="s-lanes">–</div><div class="ts" id="s-lanes-sub">lifetime ledger entries</div></div>
+  <div class="card s24-4"><h2>ALL-TIME TOKENS <span class="info" data-tip="Sum of every lane's lifetime in+out tokens. Authoritative: the ledger is never pruned.">i</span></h2>
+    <div class="tv" id="s-tok">–</div><div class="ts" id="s-tok-sub">in · out across all lanes</div></div>
+  <div class="card s24-4"><h2>OBSERVED vs UNOBSERVED <span class="info" data-tip="Tokens credited at first observation, from engine uptime before the dashboard was watching, versus tokens the dashboard actually scraped. Unobserved is real work the dashboard did not measure.">i</span></h2>
+    <div class="tv" id="s-obs">–</div><div class="ts" id="s-obs-sub">scraped · credited at first sight</div></div>
+  <div class="card s24-4"><h2>STILL SERVING <span class="info" data-tip="Lanes seen in the last 30 minutes. This is the same rule the metrics page uses to decide which 3 cards to keep.">i</span></h2>
+    <div class="tv" id="s-live">–</div><div class="ts" id="s-live-sub">active in the last 30m</div></div>
+  <div class="card s24-4"><h2>SPAN COVERED <span class="info" data-tip="Earliest to latest observation across all lanes. Per-lane time series are limited to the 14-day samples window; the ledger itself is never pruned.">i</span></h2>
+    <div class="tv" id="s-span">–</div><div class="ts" id="s-span-sub">first to last observation</div></div>
+  <div class="card s24-4"><h2>SAMPLE COVERAGE <span class="info" data-tip="Lanes with per-sample rows still inside the 7-day window. The rest stopped before the window and their samples were pruned; their lifetime tokens are intact.">i</span></h2>
+    <div class="tv" id="s-cov">–</div><div class="ts" id="s-cov-sub">lanes with series in 7d window</div></div>
+</div>
+
+<div class="row r24" id="row-hist">
+  <div class="card s24-8"><h2>TOKENS BY LANE, OVER TIME <span class="info" data-tip="Cumulative in+out tokens per lane, sampled from the per-port series inside the 7-day window. Lines end where a lane stopped being scraped — a gap is a pruned or stopped lane, not a zero. Lanes outside the window do not appear here; see the table below for their lifetime totals.">i</span></h2>
+    <div class="tsbox"><canvas id="c-lanes"></canvas><div id="lg-lanes"></div></div></div>
+  <div class="card s24-8"><h2>SHARE OF ALL-TIME TOKENS <span class="info" data-tip="Each lane's lifetime in+out tokens as a share of the total, ranked. This is the volume view: the biggest rows are the ones that actually cost GPU time.">i</span></h2>
+    <div id="lane-bars" class="bars"></div></div>
+  <div class="card s24-8"><h2>IN : OUT RATIO <span class="info" data-tip="Output tokens divided by input tokens per lane. A high ratio means the model is being asked to generate a lot relative to what it is fed — long completions, low prompt reuse. A low ratio is the opposite: heavy prefill, short replies.">i</span></h2>
+    <div id="lane-ratio" class="bars"></div></div>
+</div>
+
+<div class="row" id="row-models">
+  <div class="card s24-8" style="width:100%"><h2>ALL LANES, LIFETIME <span class="info" data-tip="Every ledger entry, sorted by lifetime tokens. The metrics page keeps only the 3 most recently used of these; everything is kept here. Removing a lane deletes its ledger row, so its lifetime totals stop counting — a backup of the database is written first.">i</span></h2>
+    <div class="tiles" id="lane-tiles"></div>
+  </div>
+</div>
+
+<div class="foot">
+  <span>per-lane totals from the sqlite ledger · never pruned · per-sample series limited to 7d</span>
+  <span id="src-note"></span>
+</div>
+
+<script>
+function $(id){return document.getElementById(id);}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function cssVar(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function fmtTok(n){
+  n=Number(n)||0;
+  if(n>=1e9)return (n/1e9).toFixed(2)+'B';
+  if(n>=1e6)return (n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return (n/1e3).toFixed(1)+'k';
+  return String(Math.round(n));
+}
+function fmtDur(s){
+  s=Math.max(0,Math.floor(s));
+  var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
+  if(d)return d+'d '+h+'h';
+  if(h)return h+'h '+m+'m';
+  if(m)return m+'m';
+  return s+'s';
+}
+
+/* The lane key is a NUL-separated (model, version, engine) triple. The DOM
+   cannot carry NUL, so it arrives as U+FFFD. Show the readable parts and keep
+   the raw key on the element for the delete call -- the server normalises it
+   back (metadb._norm_key). Losing the key means deleting the wrong row. */
+function laneLabel(m){
+  /* The key is a NUL-separated (model, version, engine) triple that arrives
+     as U+FFFD. `engine` on the payload is frequently null even when the key
+     carries a real lane id, so fall back to the key's third part -- otherwise
+     every card is labelled ":?" and the port grouping silently collapses. */
+  var parts=String(m.key||'').split('\ufffd');
+  var model=m.model||parts[0]||'?';
+  var ver=parts[1]&&parts[1]!=='?'?parts[1]:null;
+  var eng=m.engine||parts[2]||null;
+  var port=null;
+  if(eng){var pm=/:(\d+)/.exec(eng); if(pm)port=pm[1];}
+  if(!port&&parts[2]){var pm2=/:(\d+)/.exec(parts[2]); if(pm2)port=pm2[1];}
+  if(!port&&m.key&&/:(\d+)/.test(m.key)){port=/:(\d+)/.exec(m.key)[1];}
+  return {model:model,ver:ver,eng:eng,port:port};
+}
+/* Cheap signature of everything a tile renders. If it is unchanged the tile
+   markup is left alone, so the DOM (and the CSS animations bound to it) are
+   not disturbed. Token counters DO change every tick, so a lane that is
+   actively serving still re-renders -- correctly, its number moved. */
+/* Signature of what a tile ACTUALLY RENDERS, not of the raw row.
+   Including last_ts was wrong: it advances on every scrape, so the guard
+   never held -- yet the displayed "last 6s ago" string can be identical
+   between polls, so the rebuild was pure churn with no visible change.
+   Every field below maps to text or a width actually written into the DOM. */
+/* The relative-age label only changes at the granularity a reader can see.
+   A 15s poll against a per-second "6s / 7s / 8s" string would rewrite every
+   tile every tick for text that looks identical. Below a minute, bucket by
+   10s: "last 6s ago" and "last 7s ago" are the same information. */
+function agoBucket(ts){
+  /* Returns the COMPLETE label, because composing "last " + X + " ago"
+     produced "last now ago" -- and any fragment the renderer has to glue
+     together is a place the two can disagree. */
+  if(!ts)return 'never seen';
+  var s=Date.now()/1000-ts;
+  if(s<0)s=0;
+  if(s<20)return 'just now';
+  if(s<60)return Math.floor(s/10)*10+'s ago';
+  return fmtDur(s)+' ago';
+}
+function laneSig(r){
+  return [r.key, fmtTok(r.total), fmtTok(r.in), fmtTok(r.out),
+          fmtDur((r.last||0)-(r.first||0)),   // span, as printed
+          agoBucket(r.last),   // whole label, as printed
+          r.dash?1:0, fmtTok(r.unobsIn+r.unobsOut),
+          portLabel(r), (r.in>0?(r.out/r.in).toFixed(3):'')  // out:in, as printed
+         ].join(',');
+}
+function barSig(list){
+  return list.map(function(x){return x[0]+'~'+x[1];}).join('|');
+}
+function portLabel(r){
+  var p=(r.label&&r.label.port)||null;
+  return p?':'+p:'no port';
+}
+function shortName(m){
+  var l=laneLabel(m);
+  var s=l.model;
+  if(s.length>34)s=s.slice(0,33)+'\u2026';
+  return s;
+}
+
+function bar(label,pct,sub,color){
+  return '<div class="barrow">'
+    +'<div class="barlab" title="'+esc(label)+'">'+esc(label)+'</div>'
+    +'<div class="bartrack"><div class="barfill" style="width:'+Math.max(0.5,pct).toFixed(2)+'%;background:'+color+'"></div></div>'
+    +'<div class="barval">'+sub+'</div></div>';
+}
+
+var LIVE_WINDOW=30*60;   // "still serving" = seen in the last 30 minutes
+var DASH_LIVE=3;         // metrics page keeps this many
+
+function render(){
+  if(!window.__painted){
+    window.__painted=true;
+    $('lane-tiles').classList.add('first');
+    $('lane-bars').classList.add('first');
+    $('lane-ratio').classList.add('first');
+    /* Remove the class once the entry animation has run. Leaving it on is
+       not neutral: `.tiles.first .tile` (specificity 0-3-0) outranks
+       `.tiles .tile{animation:none}` (0-2-0), so the rise animation would
+       replay on every later insert and the page would flicker forever. */
+    setTimeout(function(){
+      $('lane-tiles').classList.remove('first');
+      $('lane-bars').classList.remove('first');
+      $('lane-ratio').classList.remove('first');
+    },700);
+  }
+  fetch('/api/metrics',{cache:'no-store'}).then(function(r){return r.json();}).then(function(d){
+    var at=d.alltime||{}, ms=at.models||[];
+    if(!ms.length){return;}
+
+    var now=Date.now()/1000;
+    var rows=ms.map(function(m){
+      var l=laneLabel(m);
+      return {
+        m:m,label:l,key:m.key,
+        name:shortName(m),
+        in:Number(m.in_tokens)||0,out:Number(m.out_tokens)||0,
+        total:(Number(m.in_tokens)||0)+(Number(m.out_tokens)||0),
+        obsIn:Number(m.observed_in)||0,obsOut:Number(m.observed_out)||0,
+        unobsIn:Number(m.in_initial)||0,unobsOut:Number(m.out_initial)||0,
+        first:Number(m.first_ts)||0,last:Number(m.last_ts)||0,
+        live:(now-Number(m.last_ts||0))<=LIVE_WINDOW
+      };
+    });
+    var totIn=0,totOut=0,totUnobs=0,obs=0;
+    rows.forEach(function(r){
+      totIn+=r.in;totOut+=r.out;
+      totUnobs+=r.unobsIn+r.unobsOut;
+      obs+=r.obsIn+r.obsOut;
+    });
+    var totTot=totIn+totOut;
+    var live=rows.filter(function(r){return r.live;});
+    var t0=Math.min.apply(null,rows.map(function(r){return r.first||Infinity;}));
+    var t1=Math.max.apply(null,rows.map(function(r){return r.last||0;}));
+
+    // ── summary strip ──
+    $('s-lanes').textContent=rows.length;
+    $('s-lanes-sub').textContent=Object.keys(groupByEngine(rows)).length+' engines · '
+      +Object.keys(groupByPort(rows)).length+' ports';
+    $('s-tok').textContent=fmtTok(totTot);
+    $('s-tok-sub').textContent=fmtTok(totIn)+' in · '+fmtTok(totOut)+' out';
+    $('s-obs').textContent=totTot?((obs/totTot)*100).toFixed(1)+'%':'-';
+    $('s-obs-sub').textContent=fmtTok(obs)+' scraped · '+fmtTok(totUnobs)+' unobserved';
+    $('s-live').textContent=live.length;
+    $('s-live-sub').textContent=live.length
+      ? live.map(function(r){return portLabel(r);}).join(' ')
+      : 'none in the last 30m';
+    $('s-span').textContent=fmtDur(t1-t0);
+    $('s-span-sub').textContent=(t0?new Date(t0*1000).toLocaleDateString():'–')+' → '
+      +(t1?new Date(t1*1000).toLocaleDateString():'–');
+
+    // ── the 3 the metrics page keeps, by recency ──
+    /* MUST match metrics.html exactly, or the "on metrics" pill lies. Same
+       rule: lanes seen in the last 30 minutes, most recent first, top 3; with
+       a fallback to the 3 most recent of any age when nothing is live. Kept as
+       a literal duplicate on purpose -- the two pages ship together, and
+       importing across pages is not possible for static HTML. */
+    var shown=rows.filter(function(r){
+      return (now-(Number(r.last)||0))<=LIVE_WINDOW;
+    }).sort(function(a,b){return (Number(b.last)||0)-(Number(a.last)||0);})
+      .slice(0,DASH_LIVE);
+    if(!shown.length){
+      shown=rows.slice().sort(function(a,b){
+        return (Number(b.last)||0)-(Number(a.last)||0);}).slice(0,DASH_LIVE);
+    }
+    shown.forEach(function(r){r.dash=true;});
+    window.__lanes=rows;
+
+    /* Do NOT reset s-cov to a placeholder here. The per-port history fetches
+       below take ~1s; blanking the tile every 15s is the flash you see. The
+       value is simply overwritten when they resolve, and kept if they fail. */
+
+    // ── share bars ──
+    var byTot=rows.slice().sort(function(a,b){return b.total-a.total;});
+    var shareSig=barSig(byTot.map(function(r){return [r.name,r.total,portLabel(r),r.dash?1:0];}));
+    if(shareSig!==window.__shareSig){
+    window.__shareSig=shareSig;
+    $('lane-bars').innerHTML=byTot.map(function(r){
+      var pct=totTot?r.total/totTot*100:0;
+      return bar(r.name+' · '+portLabel(r),pct,
+        fmtTok(r.total)+'  '+pct.toFixed(1)+'%', r.dash?'var(--gf-bright)':'var(--gf-blue)');
+    }).join('')||'<div class="ts">–</div>';
+    }
+
+    // ── in:out ratio bars ──
+    var byRatio=rows.filter(function(r){return r.in>0;})
+      .map(function(r){return {r:r,ratio:r.out/r.in};})
+      .sort(function(a,b){return b.ratio-a.ratio;});
+    var rmax=byRatio.length?byRatio[0].ratio:1;
+    var ratioSig=barSig(byRatio.map(function(x){return [x.r.name,x.r.ratio,portLabel(x.r),x.r.dash?1:0];}));
+    if(ratioSig!==window.__ratioSig){
+    window.__ratioSig=ratioSig;
+    $('lane-ratio').innerHTML=byRatio.map(function(x){
+      return bar(x.r.name+' · '+portLabel(x.r),
+        x.ratio/rmax*100, x.ratio.toFixed(3)+' : 1',
+        x.r.dash?'var(--gf-bright)':'var(--gf-orange)');
+    }).join('')||'<div class="ts">–</div>';
+    }
+
+    // ── the tiles ──
+    var tileSig=byTot.map(function(r){return laneSig(r);}).join('|');
+    if(tileSig!==window.__tileSig){
+    window.__tileSig=tileSig;
+    $('lane-tiles').innerHTML=byTot.map(function(r){
+      var span=(r.last&&r.first)?fmtDur(r.last-r.first):'–';
+      var unobs=(r.unobsIn+r.unobsOut);
+      var bits=[
+        '<div class="tt" title="'+esc(r.name)+'">'+esc(r.name)+'</div>',
+        '<div class="tv">'+fmtTok(r.total)+'</div>',
+        '<div class="ts">'+fmtTok(r.in)+' in · '+fmtTok(r.out)+' out</div>'
+      ];
+      var tag=(r.label.eng||'no engine')+(r.label.ver?' · '+r.label.ver:'');
+      bits.push('<div class="ts" style="color:var(--dim)">'+esc(tag)+'</div>');
+      bits.push('<div class="ts" style="color:var(--dim)">'+span+' · '+agoBucket(r.last)+'</div>');
+      if(r.in>0)bits.push('<div class="ts" style="color:var(--dim)">out:in '+(r.out/r.in).toFixed(3)+'</div>');
+      if(unobs>0)bits.push('<div class="ts" style="color:var(--dim)" title="credited at first observation, from engine uptime before the dashboard was watching">'+fmtTok(unobs)+' unobserved</div>');
+      bits.push('<div class="ts cov" data-key="'+esc(r.key)+'">checking series…</div>');
+      var pill=r.dash?'<span class="pill livepill">on metrics</span>':'';
+      return '<div class="tile" style="position:relative;overflow-wrap:anywhere">'
+        +'<button title="remove this lane from the ledger" data-model="'+esc(r.m.model||'')+'" data-key="'+esc(r.key)+'"'
+        +' style="position:absolute;top:6px;right:6px;background:none;border:1px solid var(--gf-edge);'
+        +'border-radius:6px;color:var(--dim);font-size:10px;padding:1px 6px;cursor:pointer"'
+        +' onmouseover="this.style.color=\'var(--gf-red)\'" onmouseout="this.style.color=\'var(--gf-dim)\'">\u2715</button>'
+        +pill+bits.join('')+'</div>';
+    }).join('');
+    }
+
+    var del=$('lane-tiles').querySelectorAll('button[data-model]');
+    for(var i=0;i<del.length;i++){
+      del[i].addEventListener('click',function(ev){
+        laneDelModal(ev.target.getAttribute('data-model'),ev.target.getAttribute('data-key'));
+      });
+    }
+
+    // ── per-lane series: one history request PER PORT. The endpoint takes a
+    // single port and returns a flat {ts:[], total_tokens:[], ...} for it --
+    // it is not nested by port, so it cannot be scanned for every lane in one
+    // call. Ports come from the lane labels, deduped, and matched back to the
+    // lane that owned it at that moment (see countSamplesPerLane).
+    /* The 7-day per-port series changes only when a sample lands (~30s), and
+       redrawing it clears the canvas. Fetch it on its own slower clock and
+       cache it; a token tick does not need to re-request 6 ports. */
+    if(!window.__histCache||Date.now()-window.__histCache.at>SERIES_REFRESH_MS){
+      window.__histCache=window.__histCache||{};
+      window.__histCache.at=Date.now();
+      fetchPortSeries(rows);
+    }else if(window.__histCache.res){
+      applyPortSeries(window.__histCache.res,rows);
+    }
+    
+  }).catch(function(){
+    /* Leave the last good values on screen. Clearing to placeholders on a
+       transient failure reads as "all data lost" when nothing was. */
+  });
+}
+
+/* CSS.escape is not universal; build a safe attribute selector. */
+function cssq(s){return String(s).replace(/["\\]/g,'\\$&');}
+
+function groupByEngine(rows){
+  var o={};rows.forEach(function(r){var k=r.label.eng||'none';o[k]=1;});return o;
+}
+function groupByPort(rows){
+  var o={};rows.forEach(function(r){
+    var e=r.label.eng||'none';
+    var m=/:(\d+)$/.exec(e); o[m?m[1]:e]=1;});return o;
+}
+
+/* Count samples per lane by TIME WINDOW, not by port. See drawLanesFrom for
+   why: one port can host several lanes, and the payload names only one model.
+   Returns {"<name> :<port>": sampleCount}. */
+/* ── 7-day per-port series, fetched on its own slower clock ─────────────── */
+var SERIES_REFRESH_MS=60000;
+
+function fetchPortSeries(rows){
+  var ports=Object.keys(groupByPort(rows));
+  Promise.all(ports.map(function(p){
+    return fetch('/api/metrics/history?span=604800&port='+encodeURIComponent(p),{cache:'no-store'})
+      .then(function(r){return r.json();})
+      .then(function(j){return {port:p,j:j};})
+      .catch(function(){return {port:p,j:null};});
+  })).then(function(res){
+    window.__histCache=window.__histCache||{};
+    window.__histCache.res=res;
+    applyPortSeries(res,rows);
+  });
+}
+
+function applyPortSeries(res,rows){
+  var counts=countSamplesPerLane(res,rows);
+  var cov=0;
+  rows.forEach(function(r){
+    var el=$('lane-tiles').querySelector('.cov[data-key="'+cssq(r.key)+'"]');
+    var n=counts[r.name+' :'+portOf(r)]||0;
+    if(n>0)cov++;
+    if(el){
+      var txt=n>0?(n.toLocaleString()+' samples in 7d window'):'no series in 7d window';
+      if(el.textContent!==txt)el.textContent=txt;   // no churn when unchanged
+      el.style.opacity=n>0?'1':'.7';
+    }
+  });
+  $('s-cov').textContent=cov+'/'+rows.length;
+  $('s-cov-sub').textContent='lanes with series in 7d window';
+  drawLanesFrom(res,rows);
+}
+
+function countSamplesPerLane(res,rows){
+  var out={},byPort={};
+  res.forEach(function(x){(byPort[x.port]=byPort[x.port]||[]).push(x);});
+  Object.keys(byPort).forEach(function(p){
+    var j=byPort[p][0].j;
+    if(!j||!j.series||!j.series.ts)return;
+    var lanes=rows.filter(function(r){return portOf(r)===p;});
+    if(!lanes.length)return;
+    j.series.ts.forEach(function(t){
+      for(var k=0;k<lanes.length;k++){
+        var L=lanes[k];
+        if(t>=(L.first||0)&&t<=(L.last||0)){
+          var key=L.name+' :'+p;
+          out[key]=(out[key]||0)+1;
+          return;
+        }
+      }
+    });
+  });
+  return out;
+}
+
+function portOf(row){
+  var e=(row.label&&row.label.eng)||'';
+  var m=/:(\d+)$/.exec(e);
+  return m?m[1]:null;
+}
+
+function drawLanesFrom(res,rows){
+  /* res: [{port, j}] -- one flat per-port history payload each.
+     A port can host SEVERAL lanes over its life (:8000 served aeon, then
+     Qwen3.8-Flash-Next-Uncensored), and the payload reports only ONE model
+     for the port. Attributing a whole port to a single lane hands aeon the
+     samples that actually belong to the other model -- the same
+     misattribution class as the Docker published-port bug.
+
+     So split on TIME: each lane owns [first_ts, last_ts] from the ledger, and
+     a sample belongs to the lane whose window contains it. Where two lanes on
+     one port do not overlap (measured: they never do), the split is exact. */
+  var d={},byPort={};
+  res.forEach(function(x){
+    var p=x.port;
+    (byPort[p]=byPort[p]||[]).push(x);
+  });
+  Object.keys(byPort).forEach(function(p){
+    var list=byPort[p];
+    var j=list[0].j;
+    if(!j||!j.series||!j.series.ts)return;
+    var ts=j.series.ts,tt=j.series.total_tokens||[];
+    if(ts.length<2)return;
+    var lanes=rows.filter(function(r){return portOf(r)===p;});
+    if(!lanes.length)return;             // port has no ledger lane; not ours
+    ts.forEach(function(t,i){
+      var owner=null;
+      for(var k=0;k<lanes.length;k++){
+        var L=lanes[k];
+        if(t>=(L.first||0) && t<=(L.last||0)){owner=L;break;}
+      }
+      if(!owner)return;                 // outside every lane window: not ours
+      var key=owner.name+' :'+p;
+      if(!d[key])d[key]=[];
+      var prev=d[key].length?d[key][d[key].length-1][1]:null;
+      var v=Number(tt[i])||0;
+      var cum=prev==null?v:prev+Math.max(0,v-prev);
+      d[key].push([t,cum]);
+    });
+  });
+  window.__lanesSeries=d;
+  drawLanes(d);
+}
+
+function drawLanes(d){
+  var cv=$('c-lanes'); if(!cv)return;
+  var box=cv.parentNode.getBoundingClientRect();
+  var W=Math.max(240,Math.floor(box.width)),H=Math.max(120,Math.floor(box.height));
+  var dpr=window.devicePixelRatio||1;
+  cv.width=W*dpr;cv.height=H*dpr;cv.style.width=W+'px';cv.style.height=H+'px';
+  var g=cv.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,W,H);
+  var keys=Object.keys(d).filter(function(k){return d[k].length>1;});
+  if(!keys.length){
+    g.fillStyle=cssVar('--gf-dim');g.font='12px '+cssVar('--font-ui');
+    g.textAlign='center';g.fillText('no lane series inside the 7d window',W/2,H/2);
+    $('lg-lanes').innerHTML='';
+    return;
+  }
+  var t0=Infinity,t1=-Infinity,vmax=0;
+  keys.forEach(function(k){d[k].forEach(function(p){
+    if(p[0]<t0)t0=p[0];if(p[0]>t1)t1=p[0];if(p[1]>vmax)vmax=p[1];});});
+  if(t1<=t0)t1=t0+1; if(vmax<=0)vmax=1;
+  var padL=46,padR=8,padT=10,padB=18,iw=W-padL-padR,ih=H-padT-padB;
+  g.strokeStyle=cssVar('--gf-edge');g.lineWidth=1;g.font='10px '+cssVar('--font-data');
+  g.fillStyle=cssVar('--gf-dim');g.textAlign='right';g.textBaseline='middle';
+  for(var i=0;i<=4;i++){
+    var y=padT+ih*i/4;
+    g.beginPath();g.moveTo(padL,y);g.lineTo(W-padR,y);g.stroke();
+    g.fillText(fmtTok(vmax*(1-i/4)),padL-5,y);
+  }
+  g.textAlign='center';g.textBaseline='top';
+  for(var i=0;i<=3;i++){
+    g.fillText(new Date((t0+(t1-t0)*i/3)*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'}),padL+iw*i/3,padT+ih+4);
+  }
+  var palette=['#60a5fa','#22c55e','#eab308','#fb923c','#ef4444','#a78bfa','#2dd4bf','#f472b6','#94a3b8','#84cc16'];
+  keys.forEach(function(k,ki){
+    g.strokeStyle=palette[ki%palette.length];g.lineWidth=1.8;g.beginPath();
+    d[k].forEach(function(p,i){
+      var x=padL+iw*(p[0]-t0)/(t1-t0),y=padT+ih*(1-p[1]/vmax);
+      i?g.lineTo(x,y):g.moveTo(x,y);});
+    g.stroke();
+  });
+  $('lg-lanes').innerHTML=keys.map(function(k,ki){
+    return '<span class="lg"><i style="background:'+palette[ki%palette.length]+'"></i>'+esc(k)+'</span>';
+  }).join('');
+}
+
+/* ── delete a lane (loopback + token guarded, same as the metrics page) ── */
+function laneDelModal(model,key){
+  var ov=document.createElement('div');
+  ov.className='modal-ov';
+  ov.innerHTML='<div class="modal"><h3>Remove lane from the ledger?</h3>'
+    +'<p class="ts">'+esc(model)+'</p>'
+    +'<p class="ts">Lifetime tokens for this lane stop counting. A backup of the '
+    +'database is written first. This cannot be undone from the dashboard.</p>'
+    +'<div class="mact"><button class="mbtn" id="ld-no">cancel</button>'
+    +'<button class="mbtn danger" id="ld-yes">remove</button></div></div>';
+  document.body.appendChild(ov);
+  ov.querySelector('#ld-no').onclick=function(){ov.remove();};
+  ov.querySelector('#ld-yes').onclick=function(){
+    fetch('/api/data/reset',{method:'POST',
+      headers:{'Content-Type':'application/json','X-Dashboard-Token':'gx10-local-write'},
+      body:JSON.stringify({action:'model',key:key,confirm:'DELETE'})})
+      .then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});})
+      .then(function(res){
+        ov.remove();
+        toast(res.ok?('removed · '+esc(res.j.backup||'backup written'))
+                    :('error: '+esc(res.j.error||'unknown')));
+        if(res.ok)render();
+      }).catch(function(e){ov.remove();toast('error: '+e);});
+  };
+}
+function toast(msg){
+  var t=document.createElement('div');
+  t.className='toast';t.textContent=msg;
+  document.body.appendChild(t);
+  setTimeout(function(){t.remove();},4200);
+}
+
+/* Do not repaint a hidden tab: coming back should show the last painted
+   state, not a flash of re-render. */
+document.addEventListener('visibilitychange',function(){
+  if(!document.hidden)render();
+});
+
+var ro;
+window.addEventListener('resize',function(){
+  clearTimeout(ro);ro=setTimeout(function(){drawLanes(window.__lanesSeries||{});},140);
+});
+render();
+setInterval(render,15000);
+</script>
+
+</body>
+</html>

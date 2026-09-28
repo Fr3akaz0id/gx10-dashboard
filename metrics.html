@@ -253,6 +253,25 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 /* SLOTS card: live seat tiles + occupancy over the window (single lane) */
 .slotcard{display:flex;flex-direction:column}
 .slotseats{display:flex;gap:7px;align-items:stretch;flex-wrap:wrap;min-height:58px}
+/* No per-seat identity (vLLM): show concurrency honestly instead of inventing
+   numbered slots. Distinct visual language from .slottile on purpose -- it
+   must not read as "N workers". */
+.conc{flex:1 1 100%;display:flex;flex-direction:column;gap:4px;padding:2px 0}
+.conclab{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--gf-dim)}
+.conctrk{height:10px;border-radius:6px;background:var(--gf-track);overflow:hidden}
+.concfill{height:100%;border-radius:6px;background:var(--gf-blue);transition:width .3s}
+.concval{font-family:var(--font-data);font-size:15px;font-weight:700;color:var(--gf-txt)}
+.concval b{color:var(--gf-blue)}
+.concdot{font-size:9.5px;color:var(--gf-dim);opacity:.8}
+.concrate{font-size:10.5px;color:var(--gf-dim)}
+.concrate b{color:var(--gf-green);font-family:var(--font-data);font-size:12px}
+.concn{opacity:.75}
+/* ESTIMATED values (cloud SKU prices are OUR reference numbers, not measured
+   spend). Same class of honesty as labelling an estimate in a tooltip: it has
+   to be visible in the tile itself, not only on hover. */
+.tile.est{border-style:dashed}
+.tile.est .tv{opacity:.82}
+.tile.est .tt::after{content:' \00b7 est';font-size:8.5px;letter-spacing:.6px;opacity:.7}
 .slottile{position:relative;flex:1 1 54px;max-width:90px;min-height:58px;border-radius:8px;
   border:1px solid var(--gf-edge);background:var(--gf-card2);
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;
@@ -313,6 +332,7 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
   <div class="brand"><b>gx10</b></div>
   <div class="tabs">
     <a class="tab on" href="/metrics">metrics</a>
+    <a class="tab" href="/statistics">statistics</a>
     <a class="tab" href="/engines">engines</a>
     <a class="tab" href="/settings">settings</a>
   </div>
@@ -359,7 +379,7 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     </div>
   </div>
   <div class="card slotcard">
-    <h2>SLOTS <span class="info" data-tip="Concurrent request slots of the selected lane — single-lane box, so one capacity at a time. Top: live seats (lit = request in flight, its own tokens/sec — measured per slot on llama.cpp /slots, measured per request on vLLM from the completion histograms, ≈ estimate on SGLang/ds4 or a quiet vLLM lane = aggregate rate ÷ running seats). Bottom: occupancy across the window (green = running, gold = queue) — avg concurrency and time at capacity are the tuning signal: pinned at cap = saturated, mostly 0 = spare capacity. Vertical dashes mark a model (lane) change mid-window.">i</span></h2>
+    <h2>CONCURRENCY &amp; QUEUE <span class="info" data-tip="How hard this lane is being pushed, and what it does with the pressure. A SEAT is only drawn when the backend has real per-seat identity — llama.cpp /slots, where each slot is a distinct decode context with its own measured tok/s. vLLM has no such axis: num_requests_running is a concurrency COUNT against --max-num-seqs, not a set of addressable workers, and this build does not publish per-request rates on /metrics, so it gets a meter rather than four numbered tiles that would imply four workers that do not exist. Bottom: occupancy across the window (green = running, gold = queue) — avg concurrency and time at capacity are the tuning signal: pinned at cap = saturated, mostly 0 = spare capacity. Vertical dashes mark a model (lane) change mid-window.">i</span></h2>
     <div class="slotseats" id="slot-seats"></div>
     <div class="slotchart">
       <div class="chart-head"><span class="lbl">occupancy · window</span><span class="chart-val" id="slot-v">–</span></div>
@@ -407,9 +427,7 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     <div class="gwrap"><div id="g-cpu-slot"></div></div></div>
   <div class="card s24-4"><h2>ROOT DISK UTILIZATION <span class="info" data-tip="Left: / space used %. Right: / inode usage %">i</span></h2>
     <div class="dual" id="g-dsk-slot"></div></div>
-  <div class="card s24-4"><h2>SPEC DECODE ACCEPTANCE <span class="info" data-tip="speculative-decode accepted tokens / drafted tokens over the window">i</span></h2>
-    <div class="gwrap"><div id="g-spec-slot"></div></div></div>
-  <div class="card s24-8"><h2>OUTPUT TOKENS / SEC OVER TIME <span class="info" data-tip="rate(predicted tokens) per tick — decode throughput over the window">i</span></h2>
+  <div class="card s24-12"><h2>OUTPUT TOKENS / SEC OVER TIME <span class="info" data-tip="rate(predicted tokens) per tick — decode throughput over the window">i</span></h2>
     <div class="tsbox tall"><canvas id="c-otps"></canvas><div id="lg-otps"></div></div></div>
 </div>
 
@@ -419,7 +437,8 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     <div class="tsbox tall"><canvas id="c-tt"></canvas><div id="lg-tt"></div></div></div>
   <div class="card s24-8"><h2>PROMPT VS OUTPUT TOKEN MIX <span class="info" data-tip="prompt tokens/sec (green area) vs output tokens/sec (orange line) on the same axis">i</span></h2>
     <div class="tsbox tall"><canvas id="c-mix"></canvas><div id="lg-mix"></div></div></div>
-  <div class="card s24-8"><h2><span id="sp-title">SPEC DECODE ACCEPTANCE BY POSITION</span> <span class="info" id="sp-info" data-tip="vLLM: accepted/drafted per draft position (the decay curve across speculative depth). llama.cpp: per-task acceptance from the journal (covers MTP / DSpark / DFlash / EAGLE-3 / n-gram) with window detail.">i</span></h2>
+  <div class="card s24-8"><h2><span id="sp-title">SPEC DECODE ACCEPTANCE</span> <span class="info" id="sp-info" data-tip="vLLM: accepted/drafted per draft position (the decay curve across speculative depth). llama.cpp: per-task acceptance from the journal (covers MTP / DSpark / DFlash / EAGLE-3 / n-gram) with window detail.">i</span></h2>
+    <div class="gwrap" id="sp-gauge-wrap"><div id="g-spec-slot"></div></div>
     <div id="sp-wrap"></div></div>
 </div>
 
@@ -445,7 +464,7 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
     <div class="tile energy"><div class="tt">ALL-TIME COST <span class="info" data-tip="lifetime electricity cost: measured GPU energy × your configured $/kWh tariff. The token-tier equivalent is shown as context only">i</span></div><div class="tv" id="tv-at-cost">–</div><div class="ts" id="ts-at-since"></div></div>
 </div>
 <div class="row" id="row-models" style="display:none">
-  <div class="card s24-8"><h2>TOKENS BY MODEL <span class="info" data-tip="lifetime in/out tokens per model, from the ledger. Switching models on a port starts that model's own counter; engine restarts don't reset it.">i</span></h2>
+  <div class="card s24-8"><h2>TOKENS BY MODEL <span class="info" data-tip="Lifetime in/out tokens per lane, from the ledger. Switching models on a port starts that model's own counter; engine restarts don't reset it. This shows only the 3 most recently used lanes — every lane, historical included, is on the statistics page.">i</span></h2>
     <div class="row" id="row-models-grid" style="display:flex;flex-wrap:wrap;gap:12px;padding:0 14px 14px"></div>
   </div>
 </div>
@@ -806,6 +825,7 @@ function renderCost(cost){
     var tile=$('tile-sku'+i);
     if(!s){tile.style.display='none';continue;}
     tile.style.display='';
+    tile.classList.add('est');
     setText('tt-sku'+i,s.name.toUpperCase());
     setText('tv-sku'+i,fmtMoney(s.usd));
     setText('ts-sku'+i,sym()+Number(s.in_price).toFixed(2)+' in · '+sym()+Number(s.out_price).toFixed(2)+' out / Mtok');
@@ -818,6 +838,15 @@ function renderMeters(d){
   var meter=$('row-meter'), atmeter=$('row-at-meter'), mrow=$('row-models');
   if(!ct&&!at){meter.style.display='none';atmeter.style.display='none';mrow.style.display='none';return;}
   meter.style.display='';
+  /* Mark ONLY the SKU tiles. The row also holds DGX ENERGY, which is measured
+     electricity -- marking it "est" would be a fresh lie of exactly the kind
+     this marker exists to prevent. Match on the label instead of blanket-
+     marking every child, which is what the first pass did. */
+  for(var mi=0;mi<meter.children.length;mi++){
+    var lbl=meter.children[mi].querySelector('.tt');
+    if(lbl&&/CLOUD|MID|LOW|ULTRA/i.test(lbl.textContent))
+      meter.children[mi].classList.add('est');
+  }
   if(at)atmeter.style.display='';
   if(ct){
     var skus=ct.skus||[];
@@ -858,7 +887,29 @@ function renderMeters(d){
       setText('tv-at-cost',tokUsd!=null?fmtMoney(tokUsd):'–');
       setText('ts-at-since',at.since_ts?'since '+new Date(at.since_ts*1000).toLocaleDateString():'');
     }
-    var mgrid=$('row-models-grid'), models=(at&&at.models)||[];
+    var mgrid=$('row-models-grid'),models=(at&&at.models)||[];
+    /* The metrics page shows the 3 most recently used lanes; every lane,
+       historical or not, lives on /statistics. "Used" = seen in the last 30
+       minutes. Backfill to 3 from the most recent of ANY age when fewer than 3
+       lanes are live, so the card does not shrink to one tile just because the
+       other engines happen to be idle -- and never falls back to
+       token-count ranking, which would surface a dead lane ahead of a live one. */
+    var MODEL_DASH_MAX=3,MODEL_LIVE_WINDOW=30*60,_now=Date.now()/1000;
+    var byRecency=models.slice().sort(function(a,b){
+      return (Number(b.last_ts)||0)-(Number(a.last_ts)||0);});
+    var liveKeys={};
+    models.forEach(function(m){
+      if((_now-(Number(m.last_ts)||0))<=MODEL_LIVE_WINDOW)liveKeys[m.key]=1;});
+    var shown=byRecency.filter(function(m){return liveKeys[m.key];})
+                     .slice(0,MODEL_DASH_MAX);
+    if(shown.length<MODEL_DASH_MAX){
+      var have={};shown.forEach(function(m){have[m.key]=1;});
+      byRecency.forEach(function(m){
+        if(shown.length>=MODEL_DASH_MAX)return;
+        if(!have[m.key])shown.push(m);
+      });
+    }
+    models=shown;
     if(models.length){
       mrow.style.display='';
       setInner('row-models-grid',models.map(function(m){
@@ -1188,12 +1239,12 @@ function renderPanels(eng,hist,d){
     setText('sp-title','SPEC DECODE ACCEPTANCE');
     setInner('sp-wrap','<div class="spempty">'+(SPd?'per-position acceptance is not stored in history':'no speculative decoding in window')+'</div>');
   }else if(!sp.length){
-    setText('sp-title','SPEC DECODE ACCEPTANCE BY POSITION');
+    setText('sp-title','SPEC DECODE ACCEPTANCE');
     setInner('sp-wrap','<div class="spempty">'+(SPd&&SPd.source==='metrics'
       ?'this backend exports no per-position counters (gauges only) — acceptance over the last decode batch: '+((SPd&&SPd.acceptance!=null)?SPd.acceptance.toFixed(1)+'%':'–')+' · mean accepted length '+(SPd&&SPd.mean_len!=null?SPd.mean_len.toFixed(2):'–')+' tok'
       :(SPd?'spec enabled · no traffic in window (per-position appears after requests complete)':'no speculative decoding active in window'))+'</div>');
   }else{
-    setText('sp-title','SPEC DECODE ACCEPTANCE BY POSITION');
+    setText('sp-title','SPEC DECODE ACCEPTANCE');
     var sh='';
     for(var i=0;i<sp.length;i++){
       sh+='<div class="sprow"><span class="spl">pos '+sp[i].pos+'</span>'
@@ -1593,7 +1644,7 @@ function initSlotHover(){
 }
 function renderSlots(eng,hist,d){
   var seatsEl=$('slot-seats'),kpiEl=$('slot-kpi');
-  var cap=null,run=0,wait=0,seats=[],busy=[],est=false,orate=null,rsrc=null;
+  var cap=null,run=0,wait=0,seats=[],busy=[],orate=null,rsrc=null;
   var series=null,flips=[];
   var kpi=null;
   if(!hist&&eng&&eng.slot_live){
@@ -1606,10 +1657,11 @@ function renderSlots(eng,hist,d){
        exposes no per-request rates (SGLang/ds4) or the vLLM lane was quiet
        (no request completed in the poll window). orate 0/null =
        prefill or a quiet moment -> leave the seat '…' instead of '0'. */
-    if(orate!=null&&orate>0&&run>0&&busy.length&&busy.every(function(v){return v==null;})){
-      var per=Math.round(orate/run*10)/10;
-      busy=busy.map(function(){return per;});est=true;
-    }
+    /* NO estimate path. It used to split the aggregate rate over the running
+       count and print it per seat -- arithmetic that is not a measurement, in
+       the same visual style as measured values. A user reading "slot 2:
+       18.3 tok/s" would take it as observed. Removed rather than labelled:
+       an estimate has no honest slot to sit in here. */
     if(series){
       var obs=series.running.filter(function(v){return v!=null;});
       if(obs.length){
@@ -1648,23 +1700,46 @@ function renderSlots(eng,hist,d){
     }
     rsrc=busy.some(function(v){return v!=null;})?'slot':null;
   }
-  /* ── seats ── */
+  /* ── seats ──
+   A "seat" is only rendered when the backend has REAL per-seat identity:
+   llama.cpp /slots, where each slot is a distinct decode context with its own
+   measured tok/s. vLLM has no such axis -- num_requests_running is a
+   concurrency COUNT against max_num-seqs, not four addressable workers, and
+   this build does not expose per-request rates on /metrics. So for vLLM we
+   show the honest thing: a concurrency meter, not four numbered slots. */
   if(!eng){
     seatsEl.innerHTML='<div class="slotqueue idle">no lane up</div>';
   }else if(cap==null){
     seatsEl.innerHTML='<div class="slotqueue idle">lane not reporting slot capacity</div>';
+  }else if(rsrc!='slot'&&rsrc!='req'){
+    /* No per-seat source. Draw occupancy as a meter and say why. */
+    var pct=cap>0?Math.round(run/cap*100):0;
+    var mt='This backend does not expose per-seat identity. vLLM\u2019s '
+         +'num_requests_running is a concurrency count against --max-num-seqs, '
+         +'not a set of addressable workers, and this build does not publish '
+         +'per-request rates on /metrics. Showing '+cap+' numbered tiles would '
+         +'imply '+cap+' independent workers that do not exist.';
+    seatsEl.innerHTML='<div class="conc" title="'+mt+'">'
+      +'<div class="conclab">concurrent requests</div>'
+      +'<div class="conctrk"><div class="concfill" style="width:'+pct+'%"></div></div>'
+      +'<div class="concval"><b>'+run+'</b> / '+cap+'</div>'
+      +(L.req_rate!=null&&L.req_rate>0
+          ?'<div class="concrate">lane mean <b>'+L.req_rate+'</b> tok/s'
+            +' <span class="concn">('+L.req_n+' req'+(L.req_n===1?'':'s')+' completed)</span></div>'
+          :'<div class="concdot">no per-seat identity on this backend</div>')
+      +'</div>';
   }else{
     var h='';
     for(var i=0;i<seats.length;i++){
       if(seats[i]){
         var r=busy[i]!=null?busy[i]:null;
         var msrc=rsrc=='req'?'measured per request (vLLM completion histograms)'
-               :rsrc=='slot'?'measured per slot (llama /slots)':'measured';
-        var title='slot '+(i+1)+(r!=null?(est?' ≈ '+r+' tok/s — estimate: no per-request rates exposed':' '+r+' tok/s — '+msrc):' · in flight');
+               :'measured per slot (llama /slots)';
+        var title='slot '+(i+1)+(r!=null?(' '+r+' tok/s — '+msrc):' · in flight');
         h+='<div class="slottile busy" title="'+title+'">'
          +'<div class="sl">slot '+(i+1)+'</div>'
          +'<div class="sv">'+(r!=null?r:'…')+'</div>'
-         +'<div class="su">'+(r!=null?((est?'≈ ':'')+'tok/s'):'busy')+'</div></div>';
+         +'<div class="su">'+(r!=null?'tok/s':'busy')+'</div></div>';
       }else{
         h+='<div class="slottile"><div class="sl">slot '+(i+1)+'</div><div class="sv">idle</div><div class="su">free</div></div>';
       }

@@ -57,13 +57,14 @@ MAX_BODY = 4 * 1024 * 1024   # 4 MiB; every route here sends small JSON
 #      alone would wave it through. Requiring a custom header makes the
 #      request non-simple, so the browser sends a CORS preflight first; with
 #      an empty allowed-origin set the preflight fails and the browser never
-#      delivers the request.
+#      delivers the request. A cross-origin attacker cannot set this header
+#      without triggering that preflight.
 #
 # The token is a fixed local constant, not a secret: its job is to be
 # UNPREDICTABLE to a remote web page, not to authenticate a user. It lives
-# in the served JS by necessity (the browser has to send it), and someone
-# who can read the page already has it -- and already has read access, which
-# is exactly the intent here.
+# in the served JS by necessity (the browser has to send it), so anyone who
+# can read the page already has it -- and someone who can read the page can
+# already view everything, which is exactly the intent here.
 _WEB_WRITE_TOKEN = "gx10-local-write"
 _LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
@@ -424,24 +425,9 @@ def _g(m, name):
     return v.get("value") if v else None
 
 
-def _c_sum(m, name):
-    """Summed counter over all label sets (the sum(...) query)."""
-    return promparse.sum_all(m, "counters", name)
-
-
-def _g_sum(m, name):
-    """Summed gauge over all label sets."""
-    return promparse.sum_all(m, "gauges", name)
-
-
 def _c_lab(m, name, labels):
     """One label-set of a counter (e.g. request_success_total{reason=stop})."""
     return promparse.value_by_label(m, "counters", name, labels)
-
-
-def _g_lab(m, name, labels):
-    """One label-set of a gauge (e.g. num_requests_waiting_by_reason{reason})."""
-    return promparse.value_by_label(m, "gauges", name, labels)
 
 
 def _delta(prev, cur):
@@ -977,8 +963,8 @@ def _update_slots(st):
     # Persist the measured per-seat rates ONTO the sample so history can show
     # them (_seat_rate_series reads sample["seat_tps"]). Without this the seat
     # rates exist only in this transient dict and the SLOTS chart in history
-    # shows occupancy with no rate. A fresh dict so later mutation of tps
-    # cannot rewrite history.
+    # shows occupancy with no rate. Sampled dict is a fresh list so later
+    # mutation of tps cannot rewrite history.
     if st["samples"]:
         st["samples"][-1][1]["seat_tps"] = dict(tps)
 
@@ -1036,7 +1022,7 @@ def _vllm_live_rates(st):
 
     Gate: the request_* histograms exist only on a real vLLM engine (the
     sglang/llama/ds4 alias shims never fabricate them), so their presence
-    is the backend check — same trick as _vllm_measured_seat_rate.
+    is the backend check — same trailing-window trick as _vllm_measured_req_rate.
     """
     w = _ring_window(st.get("samples") if st else None, VLLM_LIVE_RATE_WINDOW_S)
     if not w:
@@ -1072,7 +1058,7 @@ def _vllm_live_rates(st):
     return out, inp, tot, True
 
 
-def _vllm_measured_seat_rate(st):
+def _vllm_measured_req_rate(st):
     """Measured per-request decode rate (tok/s) for a vLLM lane, from the
     per-request histograms vLLM samples at request completion.
 
@@ -1141,11 +1127,25 @@ def _vllm_measured_seat_rate(st):
 
 
 def _live_slot_state(st):
-    """Live per-slot occupancy: which seats are busy right now, how many
-    queue behind them, and each busy seat's own decode rate. The rate is a
-    measurement where the backend exposes one — per-slot on llama.cpp (/slots),
-    per-request on vLLM (the completion histograms) — and None otherwise, so
-    the UI renders an aggregate÷running estimate for it."""
+    """Live concurrency, queue depth, and each busy seat's own decode rate
+    WHERE THE BACKEND MEASURES ONE.
+
+    A "seat" is drawn only for llama.cpp, whose /slots endpoint gives each slot
+    a real identity and a real decode rate (src="slot"). vLLM has no seat axis:
+    num_requests_running is a count against --max-num-seqs, not a set of
+    addressable workers. The completion histograms yield ONE fleet-wide
+    per-request mean, identical for every in-flight request, so stamping it on
+    each seat would present a fleet average as N independent measurements.
+    src therefore stays None for vLLM and the UI draws a concurrency meter.
+
+    Two things this deliberately does NOT do, both of which shipped and both of
+    which read as measured data:
+      * src="req" filling every busy seat with the fleet-wide mean.
+      * letting the UI divide the aggregate rate by the running count to
+        manufacture a per-seat figure.
+    An estimate has no honest seat to sit in here; the honest answer is to show
+    concurrency and say why per-seat identity is unavailable.
+    """
     if not st:
         return {}
     cap = st.get("slot_cap")
@@ -1156,25 +1156,23 @@ def _live_slot_state(st):
         wait = int(_g(st["samples"][-1][1], "vllm:num_requests_waiting") or 0)
     seats = [True] * run + [False] * max(0, (cap or 0) - run)
     src = None
+    busy = [None] * run
     if tps:
-        # llama.cpp /slots: a real per-seat decode rate (src="slot").
+        # llama.cpp /slots: a real per-seat decode rate.
         rates = [round(v, 1) for v in tps.values()]
         busy = sorted(rates, reverse=True)[:run]
         while len(busy) < run:
             busy.append(None)
         src = "slot"
-    else:
-        busy = [None] * run
-        # vLLM: no per-seat identity, but the request histograms give a
-        # measured per-request decode rate — stamp it on the busy seats
-        # (src="req"). Quiet lane (no completions this tick) → stay None so
-        # the UI falls back to its aggregate estimate.
-        mtps, _n = _vllm_measured_seat_rate(st)
-        if mtps is not None and run > 0:
-            busy = [mtps] * run
-            src = "req"
+    # Lane-wide measured decode rate (one number for the whole lane, from the
+    # request histograms). It is a real measurement and genuinely useful, but
+    # it is the mean over requests that completed in the window -- it is NOT
+    # any one seat's rate, so it is published under its own key and rendered
+    # as a lane figure, never filled into a seat tile.
+    req_rate, req_n = _vllm_measured_req_rate(st)
     return {"cap": cap, "run": run, "wait": wait, "seats": seats,
-            "busy": busy, "src": src}
+            "busy": busy, "src": src,
+            "req_rate": req_rate, "req_n": req_n}
 
 
 def _is_llamacpp_sample(sample):
@@ -1240,23 +1238,6 @@ def _ttft_rows(port, since_ts):
     return rows
 
 
-def _ttft_step(rows, out_ts):
-    """Per-task TTFT as a step series aligned to out_ts: each ts carries the
-    latest completed task's prompt-processing time at or before it (null
-    before the first task in the window)."""
-    if not rows:
-        return [None] * len(out_ts)
-    rts = [r[0] for r in rows]
-    out = [None] * len(out_ts)
-    last = None
-    for j, t in enumerate(out_ts):
-        k = bisect.bisect_right(rts, t)
-        if k > 0:
-            last = rows[k - 1][1]
-        out[j] = last
-    return out
-
-
 def _ttft_step_pct(rows, out_ts):
     """Rolling [p50,p95,p99] of every task completed up to each out_ts
     (all-None before the first task in the window)."""
@@ -1287,19 +1268,7 @@ def _window_stats(st, window_s):
         "tpot_p50": None, "tpot_p95": None, "tpot_p99": None,
         "e2e_p50": None, "e2e_p95": None, "e2e_p99": None,
         "kv_pct": None, "running": None, "waiting": None,
-        "preemptions_per_min": None, "prefix_hit_rate": None, "spec_acceptance": None,
-        # --- richer breakdowns (ported from the Grafana row) ---
-        "spec_pos": [],                 # [{"pos":0,"pct":..}, ...] acceptance by position
-        "finish_reasons": [],           # [{"reason":"stop","count":n}, ...]
-        "finish_per_min": None,         # sum(finish)/window in req/min
-        "prompt_src": [],               # [{"src":"local_compute","count":n}, ...]
-        "prompt_cached_pct": None,      # % of prompt tokens served from cache
-        "total_tokens": None,           # in-window token total (window-agnostic est.)
-        "in_tokens": None,              # in-window input (prompt) token total
-        "out_tokens": None,             # in-window output (generated) token total
-        "http_2xx_per_min": None,       # api success rate
-        "http_4xx_per_min": None,       # api error rate
-        # --- absolute KV budget ---
+        # --- absolute KV budget (vLLM cache_config_info) ---
         # kv_pct alone is a percentage with no denominator: "62%" does not say
         # whether 470k or 40k tokens of headroom remain. These carry the real
         # budget so the UI can render "412k of 1.24M tokens" and derive the
@@ -1316,6 +1285,18 @@ def _window_stats(st, window_s):
         # per-sample percentages.
         "prefix_hits": None,
         "prefix_queries": None,
+        "preemptions_per_min": None, "prefix_hit_rate": None, "spec_acceptance": None,
+        # --- richer breakdowns (ported from the Grafana row) ---
+        "spec_pos": [],                 # [{"pos":0,"pct":..}, ...] acceptance by position
+        "finish_reasons": [],           # [{"reason":"stop","count":n}, ...]
+        "finish_per_min": None,         # sum(finish)/window in req/min
+        "prompt_src": [],               # [{"src":"local_compute","count":n}, ...]
+        "prompt_cached_pct": None,      # % of prompt tokens served from cache
+        "total_tokens": None,           # in-window token total (window-agnostic est.)
+        "in_tokens": None,              # in-window input (prompt) token total
+        "out_tokens": None,             # in-window output (generated) token total
+        "http_2xx_per_min": None,       # api success rate
+        "http_4xx_per_min": None,       # api error rate
     }
     if not pts:
         return res
@@ -1394,7 +1375,7 @@ def _window_stats(st, window_s):
                 #
                 # The histogram is still the right source for a DIFFERENT
                 # number: tokens ÷ decode-time per completed request, which is
-                # what _vllm_measured_seat_rate reports per seat. Keep the two
+                # what _vllm_measured_req_rate reports for the lane as a whole. Keep the two
                 # apart — aggregate live rate from the counter, per-request
                 # speed from the histogram.
                 d_out_now = _delta(_c(recent[0][1], "vllm:generation_tokens_total"),
@@ -1699,7 +1680,15 @@ def _engine_series(st, window_s):
             for j, i in enumerate(idx):
                 ttft_p[i] = step[j]
     else:
+        # Only the strided output points are ever read back (out["ttft_p*"]
+        # is assembled with idx below), so computing every tick in the ring
+        # threw away ~2/3 of the work. _hist_delta copies the whole previous
+        # bucket dict on each call, so at n=450 this was the largest single
+        # item in the request path for no benefit.
+        want = set(idx)
         for i in range(1, n):
+            if i not in want:
+                continue
             hd = _hist_delta(pts[i - 1][1].get("histograms", {}).get("vllm:time_to_first_token_seconds"),
                              pts[i][1].get("histograms", {}).get("vllm:time_to_first_token_seconds"))
             if hd and hd.get("count"):
@@ -1749,9 +1738,9 @@ def _seat_rate_series(st, idx, pts):
     The live per-seat rate is recomputed in _update_slots from the previous
     /slots poll and kept in st["slot_tps"], which is not in the sample ring.
     Reconstructing it from the ring is impossible (a /slots delta needs the
-    prior poll), so _update_slots stores the measured rates on the sample
-    itself at scrape time and this reads them back — the only honest way to
-    have seat rates in history rather than in a transient dict.
+    prior poll), so this stores the measured rates on the sample itself at
+    scrape time and reads them back here — the only honest way to have seat
+    rates in history rather than in a transient dict.
 
     Returns a list aligned with idx: [None | [rate, ...]] — None on a backend
     with no seat identity, so the UI can distinguish "no such backend" from
@@ -2116,7 +2105,13 @@ def _db_maybe_write(gpu_info_now):
         # credit lifetime counters + whole-GPU power at LEDGER_FLUSH_S cadence
         now = time.time()
         if _last_ledger_flush is None or now - _last_ledger_flush >= metadb.LEDGER_FLUSH_S:
-            _last_ledger_flush = now
+            # Do NOT advance _last_ledger_flush until the work below has
+            # actually succeeded. It used to be set first, so a throw inside
+            # ledger_update/model_ledger_update left the timestamp advanced:
+            # the next attempt waited a further 30s, and a repeat offender
+            # froze the all-time token meters indefinitely while write_sample
+            # (which runs earlier) kept landing rows. The only evidence was a
+            # line in dashboard.log. Set it only on the success path.
             metadb.ledger_backfill(_db_conn, 0)
             pw = gpu_info_now.get("power_w") if gpu_info_now else None
             with eng_metrics["lock"]:
@@ -2132,6 +2127,7 @@ def _db_maybe_write(gpu_info_now):
                                                ident.get("version"), ident.get("engine"),
                                                it, ot)
             metadb.ledger_update(_db_conn, -1, None, None, pw)  # idle energy
+            _last_ledger_flush = now
         _db_conn.commit()
         if time.time() - _db_last_prune_check > 86400:
             _db_last_prune_check = now
@@ -2272,11 +2268,14 @@ def loop():
 
 
 def _unit_state_full(unit):
-    """active / failed / inactive / unknown + enabled state."""
-    # run_argv (shell=False) rather than run() with an f-string. The name is
-    # config-derived and charset-checked today, so there is no live hole --
-    # but this is the same string-built-shell shape that was an actual RCE in
-    # _docker_inspect_json, and a unit name has no need for shell parsing.
+    """active / failed / inactive / unknown + enabled state.
+
+    run_argv (shell=False) rather than run() with an f-string. The name is
+    config-derived and charset-checked today, so there is no live hole --
+    but this is the same string-built-shell shape that was an actual RCE in
+    _docker_inspect_json, and a unit name has no legitimate need for shell
+    parsing. Defence in depth costs nothing here.
+    """
     st = run_argv(["systemctl", "is-active", str(unit)]).stdout.strip() or "unknown"
     en = run_argv(["systemctl", "is-enabled", str(unit)]).stdout.strip() or "unknown"
     return st, en
@@ -2763,8 +2762,11 @@ def _safe_docker_name(name):
 def _systemctl_argv(*args):
     """systemctl argv, prefixed with sudo when we are not already root.
 
-    Under a non-sudo user the prefix is skipped and systemctl simply fails as
-    before."""
+    The service runs as a non-root user with NOPASSWD sudo, so without the
+    prefix every lifecycle button failed with "Interactive authentication
+    required" while the UI reported a generic error. Under a non-sudo user the
+    prefix is skipped and systemctl simply fails as before.
+    """
     argv = ["systemctl", *args]
     if os.geteuid() != 0:
         argv = ["sudo", "-n", *argv]
@@ -2776,11 +2778,11 @@ def unit_action(unit, action):
     if action not in ok_actions:
         raise ValueError("bad action")
     # Membership gate: only units declared in config.json may be acted on.
-    # Without this, /api/engines/unit/<any>/action could act on ANY unit
+    # Without this, /api/engines/unit/<any>/action could restart ANY unit
     # on the box. _config_unit_path also enforces the basename + charset.
     if not _config_unit_path(unit):
         raise ValueError("unit not in config")
-    unit = _safe_docker_name(unit)
+    unit = _safe_docker_name(unit)   # same charset as a unit basename
     if not unit.endswith(".service"):
         unit += ".service"
     r = run_argv(_systemctl_argv(action, unit), timeout=60)
@@ -2804,6 +2806,7 @@ def docker_action(name, action):
 
 ENGINES_PAGE_PATH = os.path.join(BASE_DIR, "engines.html")
 METRICS_PAGE_PATH = os.path.join(BASE_DIR, "metrics.html")
+STATISTICS_PAGE_PATH = os.path.join(BASE_DIR, "statistics.html")
 SETTINGS_PAGE_PATH = os.path.join(BASE_DIR, "settings.html")
 SETUP_PAGE_PATH = os.path.join(BASE_DIR, "setup.html")
 
@@ -2841,6 +2844,13 @@ METRICS_PAGE_PATH = os.path.join(BASE_DIR, "metrics.html")
 
 def load_metrics_page():
     with open(METRICS_PAGE_PATH, "rb") as f:
+        return f.read()
+
+
+def load_statistics_page():
+    """Per-lane all-time statistics. Same data source as the metrics page
+    (the never-pruned model ledger), so the two can never disagree."""
+    with open(STATISTICS_PAGE_PATH, "rb") as f:
         return f.read()
 
 
@@ -3034,12 +3044,13 @@ def _engine_proc(port):
     """World-readable /proc/*/cmdline scan → the process bound to `port`
     (any binary; the --port flag is the key). cmdline is world-readable even
     for other-user processes, so no root is needed. Returns
-    {pid, args, base, container} or None. Cached 10s.
+    {pid, args, base} or None. Cached 10s (the scan reads every /proc/*/cmdline).
 
     DOCKER: a published port is not the port the process advertises. Resolve
     the mapping first and scan for the CONTAINER-side port instead, so a
     Docker lane is visible to every /proc-derived feature (slot cap, RSS,
-    model/version, TTFT + spec-decode journal rows).
+    model/version, TTFT + spec-decode journal rows). The container name is
+    returned as `container` so callers can tell the two apart.
 
     Deliberately does NOT scan the host port as a fallback when a mapping
     exists: that is exactly how a dead lane on the container-internal port
@@ -3335,18 +3346,32 @@ def _model_version(port, st, backend):
 
 
 def _model_identity(port, st):
-    """Composite ledger identity: (model base, version, engine) -> key.
+    """Composite ledger identity: (model base, version, engine family) -> key.
 
-    One row per (model, version, engine): the same base served on two lanes,
-    or in two quants, is two rows. `key` is NUL-joined — model names never
-    contain NULs, so collisions are impossible. Computed every scrape so a
-    model/quant/engine swap on a port is attributed to the right row."""
+    The PORT IS NOT PART OF THE IDENTITY. It used to be (`engine` was
+    "vllm:8001"), which meant one model whose lane moved ports split into two
+    ledger rows: the brain lane went host :8000 -> :8001 on 2026-09-26 17:40
+    and the same model, same recipe, same engine, appeared twice with two
+    different totals. Nothing was double counted — both rows were real,
+    non-overlapping lifetimes — but "one model, two cards, two numbers" is
+    unreadable and it gets worse every time a port changes.
+
+    Identity is now (model base, version, engine FAMILY): vllm, llama.cpp,
+    sglang. Quants and model variants still separate, which is the distinction
+    that matters. The endpoint is still tracked where it belongs: per-port, in
+    `model_watermarks`, `ledger`, and `samples`. Moving a lane no longer
+    forks its history; re-pointing the SAME model at a second port
+    concurrently also no longer splits, which is the intended trade.
+
+    `key` is NUL-joined — model names never contain NULs, so collisions are
+    impossible. Computed every scrape so a model/quant/engine swap is
+    attributed to the right row."""
     base = _strip_shards(_short_model(st.get("model_live")
                                       or st.get("model_cmdline")
                                       or st.get("model")
                                       or f"port {port}"))
     backend = _live_backend(port, st, None)[0]
-    engine = f"{backend}:{port}"
+    engine = backend
     version = _model_version(port, st, backend)
     return {"key": "\u0000".join([base, version or "?", engine]),
             "model": base, "version": version, "engine": engine}
@@ -3609,7 +3634,8 @@ def api_metrics_history(port, span_s):
         c.close()
     series = {k: [r.get(k) for r in rows] for k in
               ("ts", "out_tps", "in_tps", "kv_pct", "ttft_p50", "ttft_p95",
-               "ttft_p99", "tpot_p50", "tpot_p95", "e2e_p95",
+               "ttft_p99", "tpot_p50", "tpot_p95",
+               "e2e_p95",
                "queue_p95", "running", "waiting", "req_per_s",
                "prefix_hit_rate", "spec_acceptance", "preempt_per_min",
                "total_tokens", "finish_per_min", "http_2xx_per_min",
@@ -3732,21 +3758,6 @@ def settings_save(raw):
                                           fromfile="current", tofile="proposed",
                                           lineterm="", n=1)) if changed else [],
     }
-
-
-def port_in_use(port):
-    if not port:
-        return False
-    try:
-        with open("/proc/net/tcp") as f:
-            for line in f.readlines()[1:]:
-                p = line.split()
-                if len(p) > 3 and p[3] == "0A":  # LISTEN
-                    if int(p[1].split(":")[1], 16) == int(port):
-                        return True
-    except OSError:
-        pass
-    return False
 
 
 def _probe_path(p):
@@ -3938,9 +3949,10 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         # CORS: same-origin only. A wildcard let ANY web page the operator
         # visited drive the write/exec routes cross-origin. The dashboard is
-        # served from this same host, so a same-origin XHR needs no CORS
-        # header at all. Add explicit origins to _CORS_ALLOWED_ORIGINS only if
-        # a separate frontend is ever hosted elsewhere.
+        # served from this same host, so echoing nothing (no ACAO header) is
+        # correct for the normal case; a same-origin XHR needs no CORS header
+        # at all. Config can opt into explicit origins if a separate frontend
+        # is ever hosted elsewhere.
         origin = self.headers.get("Origin")
         if origin and origin in _CORS_ALLOWED_ORIGINS:
             self.send_header("Access-Control-Allow-Origin", origin)
@@ -3951,8 +3963,9 @@ class H(BaseHTTPRequestHandler):
 
     def _read_body(self):
         # Hard cap. Content-Length was trusted outright, so a single request
-        # could claim an arbitrary allocation, and ThreadingHTTPServer gives a
-        # thread per connection -- N concurrent large bodies multiply it.
+        # could claim an arbitrary allocation, and ThreadingHTTPServer gives
+        # a thread per connection -- N concurrent large bodies multiply it
+        # on a 121 GiB box. Refuse before reading, not after.
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -4053,7 +4066,9 @@ class H(BaseHTTPRequestHandler):
             # ; > $() is rejected instead of executed.
             try:
                 if _config_unit_path(name):
-                    self._json({"logs": catalog.engine_logs(name + ("" if name.endswith(".service") else ".service"), tail=lines)})
+                    self._json({"logs": catalog.engine_logs(
+                        name + ("" if name.endswith(".service") else ".service"),
+                        tail=lines)})
                 else:
                     self._json({"logs": catalog.docker_logs(name, tail=lines)})
             except ValueError as e:
@@ -4094,6 +4109,8 @@ class H(BaseHTTPRequestHandler):
                 body = load_engines_page()
             elif path in ("/settings", "/settings.html"):
                 body = load_settings_page()
+            elif path in ("/statistics", "/statistics.html"):
+                body = load_statistics_page()
             else:
                 # "/" (and /metrics, /metrics.html) serve the metrics page —
                 # it's the source of truth and the landing page now.
@@ -4239,8 +4256,8 @@ class H(BaseHTTPRequestHandler):
                             err("model key required")
                             return
                         # Report honestly when nothing matched. reset_model
-                        # deletes by exact key; a key mangled in transit (the
-                        # NUL-separated triple cannot survive an HTML
+                        # deletes by exact key; a key mangled in transit
+                        # (the NUL-separated triple cannot survive an HTML
                         # attribute intact) matches zero rows, and the UI
                         # showed "removed" while the card stayed on screen.
                         pre = rc.execute("SELECT COUNT(*) FROM model_ledger "
