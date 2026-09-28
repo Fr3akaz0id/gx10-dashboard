@@ -110,6 +110,8 @@ the nearest). The full span is fetched, then decimated server-side.
 
 ```jsonc
 { "port": 30000, "model": "...", "backend": "sglang", "span_s": 3600,
+  "models": [{"model": "...", "points": 1180}],  // EVERY model in the window
+  "model_is_partial": false,   // true when models.length > 1
   "points": 1250,              // a COUNT, not the array!
   "series": { "ts": [...], "out_tps": [...], "in_tps": [...],
               "kv_pct": [...], "ttft_p50": [...], "ttft_p95": [...],
@@ -123,6 +125,21 @@ the nearest). The full span is fetched, then decimated server-side.
   "gpu": {...}, "gpu_hw": {...}, "spec": {...},
   "tokens": {...}, "cost": {...}, "cost_today": {...}, "alltime": {...} }
 ```
+
+**A port's window can span a model switch.** `model` is the NEWEST model seen
+in the window -- it does not describe the whole window once a port has served
+two models. That is what `models` and `model_is_partial` are for:
+
+* `models` — every model that appears in the window, with its point count.
+* `model_is_partial` — `true` when there is more than one, so a UI can say
+  "this window covers 2 models" instead of silently labelling older history
+  with the newest model.
+* `series.model` — the model at each point, aligned with `series.ts`, so a
+  client can partition the window exactly rather than inferring boundaries
+  from `slot.model_flips`.
+
+Unchanged: `model` is still the newest model, for clients that only want a
+label.
 
 Arrays under `series.<key>` align index-for-index with `series.ts`.
 `running`/`waiting` are real in history now (samples table stores them at 30 s

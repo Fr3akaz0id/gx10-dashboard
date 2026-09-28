@@ -3632,6 +3632,25 @@ def api_metrics_history(port, span_s):
         model = rows[-1]["model"] if rows else None
     finally:
         c.close()
+    # A port's window can span a MODEL SWITCH: same endpoint, different model
+    # before and after. `model = rows[-1]["model"]` reports only the newest, so
+    # asking about a port that served model A then model B labels A's history
+    # as B -- the same class of misattribution as the pre-portless ledger
+    # split. Return every model in the window, and a per-point model series so
+    # a client can partition it without inferring boundaries from timestamps.
+    models_seen = {}
+    for r in rows:
+        nm = r.get("model")
+        if nm:
+            models_seen[nm] = models_seen.get(nm, 0) + 1
+    model_list = [{"model": nm, "points": n}
+                  for nm, n in sorted(models_seen.items(), key=lambda kv: -kv[1])]
+    # `model` stays for clients that just want a single label: the newest
+    # model in the window. model_is_partial flags that it does NOT stand for
+    # all of it, so a UI can say so instead of silently mislabelling.
+    model = rows[-1]["model"] if rows else None
+    # Per-point model, so the switch point is explicit rather than guessed.
+    series_model = [r.get("model") for r in rows]
     series = {k: [r.get(k) for r in rows] for k in
               ("ts", "out_tps", "in_tps", "kv_pct", "ttft_p50", "ttft_p95",
                "ttft_p99", "tpot_p50", "tpot_p95",
@@ -3645,6 +3664,7 @@ def api_metrics_history(port, span_s):
     # The frontend reads sr.total_tps on the history path (metrics.html), so the
     # TOTAL TOKENS/SEC tile, its two sparklines and the whole TOKEN THROUGHPUT
     # card rendered empty on 1h/24h/7d while working fine on the live path.
+    series["model"] = series_model
     series["total_tps"] = [
         (r.get("in_tps") or 0) + (r.get("out_tps") or 0) for r in rows]
     # Absolute KV budget in history, so a past window can answer "how many
@@ -3703,7 +3723,8 @@ def api_metrics_history(port, span_s):
     gpu = {k: [r.get(k) for r in gpu_rows] for k in
            ("ts", "sm_clock_mhz", "temp_c", "power_w", "throttle_active",
             "util_pct", "nvme_c")}
-    resp = {"port": port, "model": model, "backend": backend,
+    resp = {"port": port, "model": model, "models": model_list,
+            "model_is_partial": len(model_list) > 1, "backend": backend,
             "span_s": span_s,
             "points": len(rows), "series": series, "gpu": gpu,
             "gpu_hw": gpu_hw(),
