@@ -112,10 +112,17 @@ class TestMutationsCaught(unittest.TestCase):
         # <h2>SPEC DECODE ACCEPTANCE ...</h2> card. An earlier version of this
         # mutation injected the heading in a shape the guard's regex never
         # matched, so the "mutation" passed and proved nothing.
+        # Anchor on the id, not the class list: the gauge wrap gained a
+        # "shared" modifier when it stopped claiming the full card height, and
+        # a class-exact anchor silently stopped matching -- the mutation
+        # became a no-op that still "passed".
+        anchor = re.search(r'<div class="gwrap[^"]*" id="sp-gauge-wrap">', HTML)
+        self.assertIsNotNone(anchor, "gauge wrap anchor must exist")
         mutated = HTML.replace(
-            '<div class="gwrap" id="sp-gauge-wrap">',
+            anchor.group(0),
             '</div></div><div class="card s24-4"><h2>SPEC DECODE ACCEPTANCE'
             ' <span class="info" data-tip="x">i</span></h2><div class="gwrap">', 1)
+        self.assertNotEqual(mutated, HTML, "mutation must actually change the file")
         headings = re.findall(r"<h2>(?:<span[^>]*>)?(SPEC DECODE[^<]*)", mutated)
         self.assertEqual(len(headings), 2,
                          "mutation should recreate the duplicate card")
@@ -138,6 +145,30 @@ class TestMutationsCaught(unittest.TestCase):
             if spans and sum(spans) != 24:
                 bad = True
         self.assertTrue(bad, "an overflowing row must fail the 24-column guard")
+
+
+
+
+    def test_spec_gauge_does_not_eat_the_card(self):
+        """The merged spec card holds a gauge AND the per-position rows.
+
+        .gwrap is height:calc(100% - 24px), which was written for a card that
+        contains nothing else. Sharing the card, it claimed the whole height
+        and pushed "no speculative decoding active in window" 24px BELOW the
+        card border. Measured in the browser; guarded here.
+        """
+        with open(os.path.join(ROOT, "metrics.html")) as fh:
+            h = fh.read()
+        self.assertIn("sp-gauge-wrap", h)
+        # it must be the .shared variant, not the plain full-height one
+        self.assertIn('<div class="gwrap shared" id="sp-gauge-wrap">', h)
+        self.assertNotIn('<div class="gwrap" id="sp-gauge-wrap">', h)
+        # and the shared variant must be height:auto, not the calc() claim
+        shared = h.split(".gwrap.shared{")[1].split("}")[0]
+        self.assertIn("height:auto", shared)
+        self.assertNotIn("calc(100% - 24px)", shared)
+        # the sibling content must come after it, inside the same card
+        self.assertLess(h.index("sp-gauge-wrap"), h.index('id="sp-wrap"'))
 
 
 if __name__ == "__main__":

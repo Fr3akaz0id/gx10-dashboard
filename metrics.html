@@ -148,6 +148,12 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .dual .gauge .num{font-size:17px;top:37px}
 .dual .gauge .gsub{font-size:9px;top:63px}
 .gwrap{display:flex;align-items:center;justify-content:center;height:calc(100% - 24px)}
+/* A .gwrap that shares its card with other content must NOT claim
+   calc(100% - 24px): that left the sibling rows 0px and pushed
+   "no speculative decoding active in window" 24px below the card border.
+   Flex to the leftover space instead, with a ceiling so a tall card does not
+   stretch the gauge to cartoon size. */
+.gwrap.shared{flex:1 1 auto;height:auto;min-height:0;max-height:150px}
 /* Caption under a gauge. .gwrap claims calc(100% - 24px) of the card, so a
    sibling line must come out of that 24px budget or it overflows the card
    bottom (measured: 7px, visible outside the border). Fixed 20px line +
@@ -438,7 +444,7 @@ body.no-engage #row0,body.no-engage #row1,body.no-engage #row2,body.no-engage #r
   <div class="card s24-8"><h2>PROMPT VS OUTPUT TOKEN MIX <span class="info" data-tip="prompt tokens/sec (green area) vs output tokens/sec (orange line) on the same axis">i</span></h2>
     <div class="tsbox tall"><canvas id="c-mix"></canvas><div id="lg-mix"></div></div></div>
   <div class="card s24-8"><h2><span id="sp-title">SPEC DECODE ACCEPTANCE</span> <span class="info" id="sp-info" data-tip="vLLM: accepted/drafted per draft position (the decay curve across speculative depth). llama.cpp: per-task acceptance from the journal (covers MTP / DSpark / DFlash / EAGLE-3 / n-gram) with window detail.">i</span></h2>
-    <div class="gwrap" id="sp-gauge-wrap"><div id="g-spec-slot"></div></div>
+    <div class="gwrap shared" id="sp-gauge-wrap"><div id="g-spec-slot"></div></div>
     <div id="sp-wrap"></div></div>
 </div>
 
