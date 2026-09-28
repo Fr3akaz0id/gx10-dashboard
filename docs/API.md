@@ -6,13 +6,29 @@ keys are possible as the UI evolves.
 
 ## Pages
 
-| Path | Serves |
-|------|--------|
-| `/`, `/metrics` | metrics page (landing; any unknown non-API path falls through here) |
-| `/engines` | fleet page |
-| `/settings` | settings page |
-| `/setup` | onboarding wizard (also forced when `config.json` is missing) |
-| `/favicon.ico` | square GX10 mark |
+| Path | What it shows |
+|------|---------------|
+| `/` | Live metrics for one selected lane |
+| `/statistics` | All-time per-model statistics: every ledger lane with lifetime token totals, in:out ratio bars, 7-day series and sample coverage. Lanes whose samples aged out of retention are shown as unavailable, never as zero |
+| `/engines` | Fleet view: systemd units + docker containers |
+| `/settings` | Engine fleet editor, model roots, cost config |
+| `/setup` | Onboarding wizard (forced when no `config.json` exists) |
+
+## Model ledger identity
+
+`model_ledger` is keyed by a NUL-separated triple
+`model \x00 version \x00 engine`, where **engine is the backend family**
+(`vllm`, `llama`, `sglang`) and deliberately **not** `family:port`. A model
+whose lane moves ports stays one row with one lifetime total; the endpoint is
+tracked per-port in `model_watermarks`, `ledger` and `samples`. Model, version
+and engine family still separate rows, so two quants of the same base or two
+engines serving it remain distinct. `migrate_ledger_key.py` folds history
+created under the old port-bearing key. It is **safe by default**: a bare
+invocation only prints the plan, `--apply` commits, and `--force` additionally
+skips the backup. Token-preserving and idempotent. Stop the service before
+running it — a live instance still holds the old key-building code and will
+re-create the rows seconds after you merge them. Paths come from
+`GXDASH_DB` / `GXDASH_BACKUP_DIR`.
 
 ## GET `/api/metrics`
 
@@ -44,14 +60,21 @@ Top-level keys: `window_s`, `refresh_s`, `engines`, `host`, `gpu_hw`,
                                  out_tps} */ },
       "slot_live": { "cap": 4, "run": 2, "wait": 0,
                      "seats": [true,true,false,false],
-                     "busy": [21.6, 21.6],
-                     "src": "req" } }
-      //  src: "slot" = per-seat measured (llama.cpp /slots deltas),
-      //       "req"  = measured per-request (vLLM completion histograms:
-      //                 Δrequest_generation_tokens.sum ÷
-      //                 Δrequest_decode_time_seconds.sum over a ~20s trailing
-      //                 window; identical on each busy seat — it measures
-      //                 what one request's speed was, not seat identity),
+                     "busy": [21.6, 20.9],
+                     "src": "slot",
+                     "req_rate": 24.8, "req_n": 3 } }
+      //  src: "slot" = real per-seat identity, so busy[] carries each seat's own
+//       measured rate (llama.cpp /slots deltas). This is the ONLY value src
+//       ever takes. vLLM has no seat axis -- num_requests_running is a count
+//       against --max-num-seqs -- and does not publish per-request rates on
+//       /metrics, so src stays null and busy[] is all null; the UI draws a
+//       concurrency meter instead of inventing tiles.
+//  req_rate / req_n: the lane-wide MEAN decode rate over requests that
+//       completed in the window (Δrequest_generation_tokens.sum ÷
+//       Δrequest_decode_time_seconds.sum, ~20s trailing window), with the
+//       sample count. One number for the whole lane, rendered as
+//       "lane mean ... (N reqs completed)". Deliberately NOT distributed
+//       across seats.
       //       null   = no measured rate; the UI renders the ≈ estimate
       //                 (aggregate output rate ÷ running seats)
   ],
@@ -104,7 +127,7 @@ the nearest). The full span is fetched, then decimated server-side.
 Arrays under `series.<key>` align index-for-index with `series.ts`.
 `running`/`waiting` are real in history now (samples table stores them at 30 s
 cadence — the old "live gauges not stored" note is obsolete). `slot` is the
-window's KPI block feeding the SLOTS card: capacity, mean occupied slots,
+window's KPI block feeding the CONCURRENCY & QUEUE card: capacity, mean occupied slots,
 share of samples pinned at cap (the saturation signal), Σqueued requests, and
 `model_flips` = the series indices where the served model changed mid-window
 (single-lane box: a flip = a lane swap; the card marks them with verticals).

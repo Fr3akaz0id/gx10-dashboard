@@ -3,14 +3,10 @@
 
 WHY
     The ledger key used to be (model, version, "backend:port"), so one model
-    whose lane moved ports became two rows. The brain lane went host :8000 ->
-    :8001 on 2026-09-26 17:40; the same model, recipe and engine produced two
-    cards with two totals. Nothing was double counted (verified: the :8001 row
-    grew by exactly the engine's own counter), so this migration is a MERGE of
-    two real lifetimes, not a correction of inflated numbers.
-
-    _model_identity() no longer puts the port in the key. This brings history
-    in line so the dashboard doesn't show pre-migration rows forever.
+    whose lane moved ports became two rows -- one model, two cards, two
+    totals. Nothing was double counted; the defect was identity, not
+    arithmetic. _model_identity() no longer puts the port in the key, and this
+    brings history in line so pre-migration rows do not linger.
 
 GUARANTEES
     * Every token is preserved: new_cum = SUM(old_cum) over the group.
@@ -18,12 +14,31 @@ GUARANTEES
     * *_initial_cum summed too, so "incl. N unobserved" stays honest.
     * model_watermarks are REPOINTED at the merged key, NOT re-seeded, so the
       live counter is not re-credited on the next flush.
-    * Idempotent: running twice is a no-op.
-    * Backs up the DB before writing.
+    * Idempotent: a second run is a no-op.
+    * Backs up the DB before writing (unless --force).
 
-The engine label of the merged row is the family ('vllm', not 'vllm:8001').
-Ports remain visible per-port in ledger/samples/watermarks.
+    The merged row's engine label is the family ('vllm', not 'vllm:8001').
+    Ports stay visible per-port in ledger / samples / model_watermarks.
+
+USAGE
+    python3 migrate_ledger_key.py                 # dry run: prints the plan, writes nothing
+    python3 migrate_ledger_key.py --apply         # performs the merge
+    python3 migrate_ledger_key.py --apply --force # ... without taking a backup
+
+SAFE BY DEFAULT. A bare invocation only prints. The first version of this
+script was inverted -- it wrote unless --dry-run was passed, so a casual call
+mutated the ledger. A migration that rewrites a lifetime meter should never act
+without an explicit opt-in.
+
+STOP THE SERVICE FIRST. A running instance still holds the old key-building
+code and will re-create the rows you just merged, seconds after you merge
+them. That happened once during development and is why this note exists.
+
+Paths come from the environment so the script is not tied to one install:
+    GXDASH_DB          database to migrate   (default /opt/gx10-dashboard/metrics.db)
+    GXDASH_BACKUP_DIR  where the backup goes (default /tmp)
 """
+
 import os
 import shutil
 import sqlite3
@@ -40,7 +55,17 @@ def family(engine):
 
 
 def main():
-    dry = "--dry-run" in sys.argv
+    # SAFE BY DEFAULT. This was originally inverted -- it wrote unless
+    # --dry-run was passed, so a bare invocation on a production DB mutated
+    # it. A migration that touches a ledger nobody can rebuild should refuse
+    # to act without an explicit opt-in. --apply (or the legacy --dry-run
+    # absence) is what commits; --force additionally skips the backup.
+    args = set(sys.argv[1:])
+    dry = "--apply" not in args
+    if "--force" in args:
+        skip_backup = True
+    else:
+        skip_backup = False
     os.makedirs(BACKUP_DIR, exist_ok=True)
     stamp = time.strftime("%Y%m%d_%H%M%S")
     bak = os.path.join(BACKUP_DIR, "metrics.db.bak.keymerge.%s" % stamp)
@@ -76,11 +101,15 @@ def main():
               f"{sum(r['out_tokens_cum'] for r in v):,.0f}"))
 
     if dry:
-        print("\n--dry-run: nothing written")
+        print("\nnothing written (pass --apply to commit, --force to skip"
+              " the backup)")
         return 0
 
-    shutil.copy2(DB, bak)
-    print("\nbackup: %s" % bak)
+    if skip_backup:
+        print("\n--force: SKIPPING backup (rows are still merged in one txn)")
+    else:
+        shutil.copy2(DB, bak)
+        print("\nbackup: %s" % bak)
 
     merged = 0
     for gk, v in groups.items():

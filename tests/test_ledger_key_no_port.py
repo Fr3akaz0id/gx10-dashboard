@@ -67,6 +67,20 @@ class TestLedgerKeyHasNoPort(unittest.TestCase):
         self.assertEqual(a["key"].split("\x00")[0], "m")
         self.assertEqual(a["key"].split("\x00")[2], "vllm")
 
+    def test_migration_is_safe_by_default(self):
+        """A bare invocation must not write.
+
+        The first version inverted this: it wrote unless --dry-run was passed,
+        so a casual `python3 migrate_ledger_key.py` mutated the ledger. A
+        migration that rewrites a lifetime meter needs an explicit opt-in.
+        """
+        import re as _re
+        p = os.path.join(ROOT, "migrate_ledger_key.py")
+        with open(p) as fh:
+            src = fh.read()
+        self.assertIn('dry = "--apply" not in args', src)
+        self.assertNotIn('dry = "--dry-run" in sys.argv', src)
+
     def test_migration_script_exists_and_is_idempotent_by_construction(self):
         p = os.path.join(ROOT, "migrate_ledger_key.py")
         self.assertTrue(os.path.exists(p))

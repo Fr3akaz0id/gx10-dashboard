@@ -64,7 +64,8 @@ and [docs/CONFIG.md](docs/CONFIG.md).
 
 | Path | What it shows |
 |------|---------------|
-| `/` | Metrics landing page: GB10 gauges (SM/temp/power/util/throttle), **SLOTS card** (live per-slot seats + occupancy over the window, for the selected lane), per-engine stat cards with live tok/s, spec-decode card, REQUEST HOPPER (running/waiting, live + history), today + all-time cost meters, TOKENS BY MODEL grid |
+| `/` | Metrics landing page: GB10 gauges (SM/temp/power/util/throttle), **CONCURRENCY & QUEUE** (concurrent requests and queue depth for the selected lane; per-seat tiles appear only for backends with real per-seat identity, i.e. llama.cpp `/slots` — vLLM has none, so it gets a meter and a lane-mean decode rate), REQUEST LATENCY (TTFT / TPOT / end-to-end), SCHEDULER PRESSURE (running / waiting / preemptions), CACHE (KV occupancy + prefix reuse), spec-decode acceptance, throughput charts, cost meters, and the last three serving lanes in TOKENS BY MODEL |
+| `/statistics` | All-time per-model statistics: every lane in the ledger with lifetime token totals, in:out ratio bars, 7-day series and sample coverage. Lanes whose samples aged out of the retention window are marked unavailable rather than shown as zero |
 | `/engines` | Fleet view: systemd units + docker containers, discovery, per-unit flag editor (surgical, byte-stable unit-file writes with diff preview) |
 | `/settings` | Engine fleet editor, model roots, cost config (energy tariff + token SKUs, USD/EUR display), data reset tiers |
 | `/setup` | Onboarding wizard: scans for model dirs and inference engines, writes config.json. Forced when config.json is missing; revisit anytime (current settings pre-selected) |
@@ -83,18 +84,25 @@ and [docs/CONFIG.md](docs/CONFIG.md).
   credits only the growth since the last watermark (never the whole lifetime
   counter). A negative counter delta (engine restart) rebases instead of
   double-counting.
-- **Slot (concurrency) utilization.** Each lane's max in-flight request
-  capacity is read live from the process (`--max-running-requests` for SGLang,
-  `--max-num-seqs` for vLLM, `--parallel` for llama.cpp preferring the live
-  `/slots` count, `--max-concurrent` for ds4). The `/metrics` SLOTS card shows
-  live per-slot seats + queue for the selected lane, plus occupancy over the
-  window with avg-concurrency / %-at-cap / queued KPIs. Per-seat tok/s is a
-  real measurement where the backend exposes per-request data: per-slot on
-  llama.cpp (`/slots` deltas), per-request on vLLM (diffing the
-  `request_generation_tokens` / `request_decode_time_seconds` completion
-  histograms over a trailing ~20s window). Backends without it (SGLang/ds4)
-  — or a vLLM lane with no request completions in the window — show an
-  estimate (aggregate ÷ running), marked ≈.
+- **Concurrency and queue.** Each lane's max in-flight request capacity is read
+  live from the process (`--max-running-requests` for SGLang, `--max-num-seqs`
+  for vLLM, `--parallel` for llama.cpp preferring the live `/slots` count,
+  `--max-concurrent` for ds4). The `/metrics` CONCURRENCY & QUEUE card shows
+  concurrent requests and queue depth for the selected lane, plus occupancy
+  over the window with avg-concurrency / %-at-cap / queued KPIs.
+  **Per-seat tiles are drawn only for backends that have real per-seat
+  identity** — llama.cpp `/slots`, where each slot is a distinct decode
+  context with its own measured tok/s. vLLM has no seat axis:
+  `num_requests_running` is a concurrency count against `--max-num-seqs`, not
+  a set of addressable workers, and it does not publish per-request rates on
+  `/metrics`, so vLLM gets a meter with the reason stated inline rather than
+  numbered tiles implying workers that do not exist. The vLLM completion
+  histograms (`request_generation_tokens` / `request_decode_time_seconds`
+  diffed over a trailing ~20s window) do yield a real decode rate, but it is
+  one fleet-wide mean, so it is published as `req_rate` and drawn as
+  "lane mean … (N reqs completed)" — never filled into a seat tile, because a
+  single average repeated across N tiles reads as N independent
+  measurements.
 - **Live token-rate cards.** The OUTPUT/INPUT/TOTAL tok/s cards read the
   `*_now` fields, a real instantaneous rate rather than a window average.
   llama.cpp feeds them from per-poll `/slots` deltas. vLLM must not use its
