@@ -1185,7 +1185,12 @@ function renderPanels(eng,hist,d){
   if(sa==null){saSub=SP?'spec idle · no tasks in window':'no spec decode';}
   else if(SP&&SP.source==='journal'){
     saSub=SP.tech+(SP.mean_len!=null?' · '+Number(SP.mean_len).toFixed(2)+' tok/step':'');
-  }else{saSub='accepted / drafted';}
+  }else{
+    /* vLLM/sglang metrics path: mean_len derived from accepted/drafts
+       counters (1 + accepted/steps). The % alone distorts with draft depth;
+       tok/step is the number that maps to real decode speedup. */
+    saSub='accepted / drafted'+(SP&&SP.mean_len!=null?' · '+Number(SP.mean_len).toFixed(2)+' tok/step':'');
+  }
   setArc('g-spec',sa,'ok',sa==null?'–':Number(sa).toFixed(1)+'%',saSub);
   /* output tps chart */
   if(K.out.length){

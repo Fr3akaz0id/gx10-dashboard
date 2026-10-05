@@ -1477,6 +1477,17 @@ def _window_stats(st, window_s):
                 _c(cur, "vllm:spec_decode_num_draft_tokens_total"))
     if a is not None and dr:
         res["spec_acceptance"] = round(100.0 * a / dr, 1)
+    # Mean accepted length (tok/step) derived from counters: every verify step
+    # emits at least the bonus token, so mean_len = 1 + accepted/steps, where
+    # num_drafts_total IS the step count. vLLM logs this exact number as
+    # "Mean acceptance length"; the ratio accepted/drafted does NOT equal it
+    # and distorts with draft depth (dynamic-depth engines draft to 7 and look
+    # worse on the % while emitting the same tokens per step). None when no
+    # drafts happened in the window or on counter reset — never 0.
+    stp = _delta(_c(first, "vllm:spec_decode_num_drafts_total"),
+                 _c(cur, "vllm:spec_decode_num_drafts_total"))
+    if a is not None and stp:
+        res["spec_mean_len"] = round(1.0 + a / stp, 2)
     # SGLang: acceptance is a live gauge (spec_accept_rate, 0-1), not a
     # counter pair. Read straight off the original sglang: gauge.
     if res["spec_acceptance"] is None and any(_is_sglang_sample(p) for _t, p in pts):
@@ -3480,7 +3491,8 @@ def _engine_spec(port, window_s, stats=None):
     return {"acceptance": acc, "tech": m.group(1) if m else "vllm",
             "spec_type": None, "alias": None, "n_max": None,
             "n_tasks": None, "accepted": None, "generated": None,
-            "mean_len": None, "unit": _proc_unit(proc["pid"]),
+            "mean_len": (stats or {}).get("spec_mean_len"),
+            "unit": _proc_unit(proc["pid"]),
             "source": "metrics"}
 
 
