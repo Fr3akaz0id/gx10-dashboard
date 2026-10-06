@@ -126,6 +126,17 @@ def _normalize_engines(eng):
             port = None
         if port is not None and not (1 <= port <= 65535):
             port = None
+        # engine_port: when a metrics sidecar fronts the lane, the ENGINE
+        # lives on engine_port and the public port is the sidecar. Identity,
+        # grammar detection, and slot cap probe engine_port; /metrics and
+        # the client traffic flow through the sidecar port.
+        eport = e.get("engine_port")
+        try:
+            eport = int(eport) if eport not in (None, "") else None
+        except (TypeError, ValueError):
+            eport = None
+        if eport is not None and not (1 <= eport <= 65535):
+            eport = None
         model = e.get("model")
         label = e.get("label")
         out.append({
@@ -133,6 +144,7 @@ def _normalize_engines(eng):
             "name": n,
             "label": str(label).strip() if label not in (None, "") else None,
             "port": port,
+            "engine_port": eport,
             "model": str(model).strip() if model not in (None, "") else None,
             "enabled": bool(e.get("enabled", True)),
         })
@@ -479,10 +491,14 @@ def docker_containers(include_exited=True):
 
 def _docker_inspect_json(name):
     # shell=True WITH AN INTERPOLATED NAME IS REMOTE CODE EXECUTION.
-    # `name` comes off the URL path in /api/engines/docker/<name>; the route
-    # regex is [^/]+, which does not stop shell metacharacters. Verified live
-    # before fixing: the injected command ran as this user (NOPASSWD sudo).
-    # stderr came back in the JSON error, so it was a non-blind channel.
+    # This was reachable unauthenticated: the /api/engines/docker/<name>
+    # route captures [^/]+ (no slash needed — "x;touch PWNED" passes) and
+    # landed here unvalidated, so `docker inspect x;id` ran `id` as this
+    # user, who holds NOPASSWD sudo. stderr came back in the JSON error,
+    # making it a non-blind channel. _safe_name exists and is applied to
+    # the logs routes; it was simply never wired in here.
+    # run_argv is shell=False, so even a name that slipped past would be
+    # passed as one argv entry instead of being parsed by /bin/sh.
     name = _safe_name(name)
     r = run_argv(["docker", "inspect", name])
     if r.returncode != 0:
@@ -504,9 +520,14 @@ def recipe_from_inspect(name):
         # skip docker-injected defaults
         if e.startswith(("PATH=", "HOSTNAME=", "HOME=", "TERM=", "container=", "LS_COLORS=", "PYTHONPATH=", "PYTHON_", "CPLUS_INCLUDE", "C_INCLUDE", "LD_LIBRARY", "PKG_", "GPG_", "TZ=", "DEBIAN", "LESSCLOSE", "LESSOPEN", "HOSTNAME", "NVIDIA_REQUIRE", "NVIDIA_VISIBLE", "NVIDIA_DRIVER", "DOCKER_IMAGE")):
             continue
-        # Redact anything credential-shaped. The old code kept every
-        # non-default var, so a container carrying HF_TOKEN or VLLM_API_KEY
-        # had it served in cleartext AND persisted into recipes/<name>.json.
+        # Redact anything that looks like a credential. The old code kept
+        # every non-default var, so a container carrying HF_TOKEN or
+        # VLLM_API_KEY had it served in cleartext by
+        # GET /api/engines/docker/<name> AND persisted into
+        # recipes/<name>.json on disk. No token is in the current fleet, so
+        # this is preventative -- but the recipe file is attacker-writable
+        # via the (now fixed) traversal path, and the API is unauthenticated
+        # on 0.0.0.0, so "nothing is set today" is not a property to rely on.
         k, _, v = e.partition("=")
         if _SECRET_KEY_RE.search(k):
             envs.append("%s=%s" % (k, _REDACTED if v else ""))
@@ -557,11 +578,13 @@ def recipe_from_inspect(name):
 def _recipe_path(name):
     """Resolve a recipe file, refusing anything outside RECIPE_DIR.
 
-    The name reaches here from an unauthenticated POST body and a plain
-    os.path.join walks straight out of the directory. Two independent checks,
-    so neither is a single mistake away from a hole: _safe_name rejects any
-    metacharacter or slash, and the realpath containment check catches
-    anything that still gets through.
+    The name reaches here straight from an unauthenticated POST body, and a
+    plain os.path.join happily walks out: rec["name"] = "../../../tmp/x"
+    wrote a file outside the recipe dir (verified live over HTTP). Two
+    independent checks, because either alone is a single mistake away from
+    a hole: _safe_name rejects any metacharacter or slash at all, and the
+    realpath containment check catches anything that still gets through
+    (symlinks, future callers that forget the name check).
     """
     name = _safe_name(name)
     p = os.path.realpath(os.path.join(RECIPE_DIR, f"{name}.json"))
@@ -619,11 +642,14 @@ def docker_run_command(rec):
 
 
 def docker_apply(rec, confirm_running_loss=True):
-    """Recreate the container from the recipe. Returns (ok, detail)."""
-    # rec["name"] comes from an on-disk recipe that save_recipe accepts from
-    # an unauthenticated POST body, so it is untrusted. Validate at the point
-    # of use as well, and use run_argv so a metacharacter could never become
-    # a second command.
+    """Recreate the container from the recipe. Returns (ok, detail).
+
+    The name arrives from an on-disk recipe, which save_recipe accepts from
+    an unauthenticated POST body -- so it is untrusted input and is now
+    validated here too, at the point of use. run_argv (shell=False) rather
+    than run() with an f-string, so a name that somehow carried a
+    metacharacter could not become a second command.
+    """
     name = _safe_name(rec["name"])
     # stop + remove if present
     run_argv(["docker", "stop", name])
@@ -645,7 +671,7 @@ def _shq(s):
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 # Matches credential-looking env var NAMES (not values): TOKEN, API_KEY,
-# SECRET, PASSWORD, CREDENTIAL, PRIVATE_KEY, ACCESS_KEY, AUTH.
+# SECRET, PASSWORD, PASSWD, CREDENTIAL, PRIVATE_KEY, ACCESS_KEY, AUTH.
 _SECRET_KEY_RE = re.compile(
     r"(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|ACCESS_?KEY|"
     r"PRIVATE_?KEY|AUTH)", re.I)
@@ -751,13 +777,6 @@ def infer_engine(binary):
     return "unknown"
 
 
-def unit_file_present(name):
-    """True if the .service file exists in /etc/systemd/system."""
-    if not name.endswith(".service"):
-        name += ".service"
-    return os.path.isfile(os.path.join(SYSTEMD_SYSTEM, name))
-
-
 def _listening_ports():
     """Set of TCP ports currently in LISTEN state (from /proc/net/tcp{,6})."""
     ports = set()
@@ -779,18 +798,6 @@ def _unit_active(name):
                         timeout=5).stdout.strip() or "unknown"
     except Exception:
         return "unknown"
-
-
-def _port_probe_model(port, timeout=1.2):
-    """Best-effort: what /v1/models serves on a port (None if down)."""
-    import urllib.request
-    try:
-        req = urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=timeout)
-        data = json.load(req)
-        ids = [mm.get("id") for mm in data.get("data", [])]
-        return ids[0] if ids else None
-    except Exception:
-        return None
 
 
 def discovery_candidates():
@@ -852,6 +859,3 @@ def discovery_candidates():
             port_map.setdefault(p, []).append(e["name"])
     return {"units": units, "docker": docker, "listening": {str(k): v for k, v in port_map.items()}}
 
-
-def _port_in_use(port):
-    return port in _listening_ports() if port else False

@@ -691,6 +691,8 @@ def _with_exl3_aliases(parsed):
     per-position spec acceptance, HTTP status rates, preemptions.
     request_success_total keeps its partial finish split — stated clauses
     plus the unlabelled remainder ('?' semantics live in the bridge)."""
+    if parsed is None:
+        parsed = {"counters": {}, "gauges": {}, "histograms": {}}
     ctr, g, h = (parsed.get("counters", {}), parsed.get("gauges", {}),
                  parsed.get("histograms", {}))
 
@@ -736,6 +738,64 @@ def _is_ds4_sample(sample):
 
 def _is_exl3_sample(sample):
     return exl3metrics.SIGNATURE in (sample or {}).get("counters", {})
+
+
+def _is_tabby_sidecar_sample(sample):
+    return "tabby_tokens_total" in (sample or {}).get("counters", {})
+
+
+def _overlay_tabby_sidecar(parsed, sidecar):
+    """Overlay the tabby-sidecar's exact client-side counters on the journal
+    sample. The sidecar sees every request on the wire: usage blocks are
+    exact (no regex, no cancellation blind spot) and tokens_total increments
+    DURING generation, so the live-rate path finally reads real tok/s on
+    exl3 lanes. Journal values stay for everything the sidecar doesn't
+    measure (latency histograms, per-source split, '?'-semantics splits)."""
+    if sidecar is None or not _is_tabby_sidecar_sample(sidecar):
+        return parsed
+    if parsed is None:
+        parsed = {"counters": {}, "gauges": {}, "histograms": {}}
+    ctr = parsed.setdefault("counters", {})
+    g = parsed.setdefault("gauges", {})
+    sc_ctr, sc_g = sidecar["counters"], sidecar.get("gauges", {})
+
+    def _lab(series, labels):
+        for s in (series or []):
+            if all(s["labels"].get(k) == v for k, v in labels.items()):
+                return s["value"]
+        return None
+
+    tok = sc_ctr.get("tabby_tokens_total", {})
+    comp = _lab(tok.get("series"), {"type": "completion"})
+    prom = _lab(tok.get("series"), {"type": "prompt"})
+    # generation tokens: the live-rate counter. Journal exl3 counters map
+    # exl3:prompt_tokens_total -> vllm:prompt_tokens_total via the alias
+    # shim; completion has NO journal alias because the journal has no
+    # mid-generation readout — expose the sidecar value directly.
+    if comp is not None:
+        ctr["vllm:generation_tokens_total"] = {"value": comp, "labels": {}}
+    if prom is not None:
+        ctr["vllm:prompt_tokens_total"] = {"value": prom, "labels": {}}
+    if "tabby_cache_tokens_total" in sc_ctr:
+        ctr["vllm:prefix_cache_hits_total"] = {
+            "value": sc_ctr["tabby_cache_tokens_total"]["value"], "labels": {}}
+    if "tabby_requests_total" in sc_ctr:
+        ctr["vllm:num_requests_total"] = {
+            "value": sc_ctr["tabby_requests_total"]["value"], "labels": {}}
+    if "tabby_spec_draft_tokens_total" in sc_ctr:
+        ctr["vllm:spec_decode_num_draft_tokens_total"] = {
+            "value": sc_ctr["tabby_spec_draft_tokens_total"]["value"],
+            "labels": {}}
+    if "tabby_spec_accepted_tokens_total" in sc_ctr:
+        ctr["vllm:spec_decode_num_accepted_tokens_total"] = {
+            "value": sc_ctr["tabby_spec_accepted_tokens_total"]["value"],
+            "labels": {}}
+    if "tabby_active_requests" in sc_g:
+        g["vllm:num_requests_running"] = {
+            "value": sc_g["tabby_active_requests"]["value"], "labels": {}}
+    if "tabby_up" in sc_g:
+        parsed["_sidecar_up"] = bool(sc_g["tabby_up"]["value"])
+    return parsed
 
 
 def _is_tabby_proc(args):
@@ -808,7 +868,9 @@ def scrape_engines():
         port = e.get("port")
         if not port:
             continue
-        pr = _engine_proc(int(port))
+        # engine_port set = a tabby-sidecar fronts the engine on `port`;
+        # the process to grammar-detect lives on engine_port instead.
+        pr = _engine_proc(int(e.get("engine_port") or port))
         args = (pr or {}).get("args") or []
         # Two journal-grammar families, both exl3: serve_native.py (JSON
         # lines, exl3native) and TabbyAPI (prose lines, exl3metrics).
@@ -947,6 +1009,8 @@ def scrape_engines():
     # EXL3 lanes: no /metrics surface, journal-synthesised sample. The
     # bridge owns st["up"]/st["has_metrics"]; the caller keeps st["samples"],
     # so a bridge-side setdefault must never clobber it.
+    e_by_port = {int(e["port"]): e for e in cfg.get("engines", [])
+                 if e.get("port")}
     for port, (unit, label, grammar) in exl3_units.items():
         st = eng_metrics["engines"].get(port)
         if st is None:
@@ -966,18 +1030,37 @@ def scrape_engines():
                     mp = json.loads(raw.decode("utf-8", "replace")).get("model_path")
                     if mp:
                         st["model_live"] = os.path.basename(mp.rstrip("/"))
+                    else:
+                        dlog(f"exl3 lane {port}: /props returned no model_path")
             else:
                 parsed = exl3native.scrape_lane(port, unit, st, cursor)
-            if parsed is not None:
+            # tabby-sidecar overlay: exact live counters from the proxy
+            # fronting the engine (engine_port configured = sidecar in
+            # front; the lane port itself serves the sidecar's /metrics).
+            if e_by_port.get(port, {}).get("engine_port"):
+                try:
+                    raw = urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/metrics", timeout=1.5).read()
+                    sidecar = promparse.parse(raw.decode("utf-8", "replace"))
+                except Exception:
+                    sidecar = None
+            else:
+                sidecar = None
+            if parsed is not None or sidecar is not None:
                 parsed = _with_exl3_aliases(parsed)
+                parsed = _overlay_tabby_sidecar(parsed, sidecar)
                 st["samples"].append((time.time(), parsed))
-        except Exception:
+        except Exception as _e:
+            dlog(f"exl3 lane {port} bridge failed: {type(_e).__name__}: {_e}")
             st["has_metrics"] = st.get("has_metrics", False)
-        st["model_identity"] = _model_identity(port, st)
+        # A sidecar fronts the lane port after cutover — identity and slot
+        # cap must probe the ENGINE port, not the proxy.
+        probe_port = int(e_by_port.get(port, {}).get("engine_port") or port)
+        st["model_identity"] = _model_identity(probe_port, st)
         st["model_key"] = st["model_identity"]["key"]
         st["backend"] = st["model_identity"]["engine"].split(":")[0]
         st["slot_cap"] = _slot_capacity(
-            port, st, st["model_identity"]["engine"].split(":")[0])
+            probe_port, st, st["model_identity"]["engine"].split(":")[0])
 
 
 def _update_slots(st):
