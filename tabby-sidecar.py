@@ -51,6 +51,7 @@ _STATE = {
     "dur_max": 0.0,
     "last_up": 0.0,
     "slot_cap": 0,
+    "last_tps": 0.0,
 }
 # (monotonic_ts, completion_token_count) pairs — rolling TPS window.
 _TPS_WIN = deque()
@@ -91,6 +92,14 @@ def _account_chunk(raw, live=False, live_credited=0):
         cached = cached or tim.get("cache_n")
         sdt = sdt or tim.get("draft_n")
         sat = sat or tim.get("draft_n_accepted")
+        # engine-computed decode rate (tokens/s over decode wall time) —
+        # the ground truth for the live rate display. SSE chunk counting
+        # undercounts by the spec-decode accept factor (verified: 2.02
+        # tokens per chunk with MTP n_max 5), so chunk math is NOT the
+        # rate source; this value is.
+        pps = tim.get("predicted_per_second")
+        if isinstance(pps, (int, float)) and pps > 0:
+            _STATE["last_tps"] = float(pps)
     with _LOCK:
         if live:
             _TPS_WIN.append((time.monotonic(), 1))
@@ -292,9 +301,11 @@ class Handler(BaseHTTPRequestHandler):
         w("# HELP tabby_cache_tokens_total Cached prompt tokens")
         w("# TYPE tabby_cache_tokens_total counter")
         w(f"tabby_cache_tokens_total {cache}")
-        w("# HELP tabby_tps_gauge Output tokens/s over the last 5s")
+        last_tps = _STATE.get("last_tps") or 0.0
+        w("# HELP tabby_tps_gauge Engine decode rate while generating "
+          "(tokens/s, engine-reported; 0 when idle)")
         w("# TYPE tabby_tps_gauge gauge")
-        w(f"tabby_tps_gauge {_tps():.2f}")
+        w(f"tabby_tps_gauge {last_tps if active else 0:.2f}")
         w("# HELP tabby_spec_accept_rate Accepted / drafted spec tokens")
         w("# TYPE tabby_spec_accept_rate gauge")
         w(f"tabby_spec_accept_rate {accept_rate:.4f}")
