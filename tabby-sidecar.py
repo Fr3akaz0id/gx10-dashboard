@@ -137,9 +137,20 @@ def _slot_cap():
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = 30  # keep-alive sockets idle longer than this are dropped
 
     def log_message(self, *a):  # journald silence
         pass
+
+    def handle_one_request(self):
+        # Clients close keep-alive sockets whenever (browser refresh, curl
+        # -m timeouts). readline() then raises ConnectionResetError and
+        # socketserver dumps a traceback to journald for a no-op event.
+        # Closing the connection quietly is the correct handling.
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
 
     def _proxy(self):
         target = f"http://{ENGINE_HOST}:{ENGINE_PORT}{self.path}"

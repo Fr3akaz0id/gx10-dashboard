@@ -744,6 +744,15 @@ def _is_tabby_sidecar_sample(sample):
     return "tabby_tokens_total" in (sample or {}).get("counters", {})
 
 
+def _synth(v):
+    """promparse-shaped counter/gauge entry. sum_all() iterates the
+    `series` list, so synthetic entries MUST carry it — a dict with only
+    value/labels reads as None through sum_all and silently disables
+    ledger crediting (seen live: sidecar overlay fed the ledger
+    None, None and TOKENS BY MODEL froze while counters grew)."""
+    return {"value": v, "labels": {}, "series": [{"value": v, "labels": {}}]}
+
+
 def _overlay_tabby_sidecar(parsed, sidecar):
     """Overlay the tabby-sidecar's exact client-side counters on the journal
     sample. The sidecar sees every request on the wire: usage blocks are
@@ -773,26 +782,36 @@ def _overlay_tabby_sidecar(parsed, sidecar):
     # shim; completion has NO journal alias because the journal has no
     # mid-generation readout — expose the sidecar value directly.
     if comp is not None:
-        ctr["vllm:generation_tokens_total"] = {"value": comp, "labels": {}}
+        ctr["vllm:generation_tokens_total"] = _synth(comp)
     if prom is not None:
-        ctr["vllm:prompt_tokens_total"] = {"value": prom, "labels": {}}
+        ctr["vllm:prompt_tokens_total"] = _synth(prom)
     if "tabby_cache_tokens_total" in sc_ctr:
-        ctr["vllm:prefix_cache_hits_total"] = {
-            "value": sc_ctr["tabby_cache_tokens_total"]["value"], "labels": {}}
+        ctr["vllm:prefix_cache_hits_total"] = _synth(
+            sc_ctr["tabby_cache_tokens_total"]["value"])
+        # vLLM semantics: prefix_cache_queries_total counts the tokens that
+        # COULD hit (all prompt tokens). Without it the hits/queries ratio
+        # divides by the journal's partial counter and renders >100%.
+        if prom is not None:
+            ctr["vllm:prefix_cache_queries_total"] = _synth(prom)
     if "tabby_requests_total" in sc_ctr:
-        ctr["vllm:num_requests_total"] = {
-            "value": sc_ctr["tabby_requests_total"]["value"], "labels": {}}
+        ctr["vllm:num_requests_total"] = _synth(
+            sc_ctr["tabby_requests_total"]["value"])
     if "tabby_spec_draft_tokens_total" in sc_ctr:
-        ctr["vllm:spec_decode_num_draft_tokens_total"] = {
-            "value": sc_ctr["tabby_spec_draft_tokens_total"]["value"],
-            "labels": {}}
+        ctr["vllm:spec_decode_num_draft_tokens_total"] = _synth(
+            sc_ctr["tabby_spec_draft_tokens_total"]["value"])
     if "tabby_spec_accepted_tokens_total" in sc_ctr:
-        ctr["vllm:spec_decode_num_accepted_tokens_total"] = {
-            "value": sc_ctr["tabby_spec_accepted_tokens_total"]["value"],
-            "labels": {}}
+        ctr["vllm:spec_decode_num_accepted_tokens_total"] = _synth(
+            sc_ctr["tabby_spec_accepted_tokens_total"]["value"])
     if "tabby_active_requests" in sc_g:
-        g["vllm:num_requests_running"] = {
-            "value": sc_g["tabby_active_requests"]["value"], "labels": {}}
+        g["vllm:num_requests_running"] = _synth(
+            sc_g["tabby_active_requests"]["value"])
+    if "tabby_tps_gauge" in sc_g:
+        # Honest live rate: the sidecar counts delivered tokens per second
+        # in a rolling 5 s window. The counter-delta path would read usage-
+        # tail bursts as tens of thousands of tps — mark this sample so
+        # _window_stats takes the gauge instead of the delta.
+        g["exl3:live_tps_gauge"] = _synth(
+            sc_g["tabby_tps_gauge"]["value"])
     if "tabby_up" in sc_g:
         parsed["_sidecar_up"] = bool(sc_g["tabby_up"]["value"])
     return parsed
@@ -1599,8 +1618,17 @@ def _window_stats(st, window_s):
     # from "measured zero" downstream (the UI renders the first as –, the
     # second as 0 — never as a stale value carried from the previous poll).
     res["output_per_s_now"] = res["input_per_s_now"] = res["tokens_per_s_now"] = None
+    # Sidecar-fed exl3 lane: the tabby_tps_gauge is the honest delivered-
+    # tokens rate (rolling 5 s). The counter-delta below would read the
+    # usage-tail burst (prompt+completion credited at completion) as tens
+    # of thousands of tps — never fabricate that on this lane. Input has no
+    # live sidecar source: it stays None (rendered –, not 0).
+    gauge = _g(pts[-1][1], "exl3:live_tps_gauge")
+    if gauge is not None:
+        res["output_per_s_now"] = round(gauge, 2)
+        res["tokens_per_s_now"] = round(gauge, 2)
     recent = [(t, p) for (t, p) in pts if now_t - t <= 10.0]
-    if len(recent) >= 2:
+    if gauge is None and len(recent) >= 2:
         r_dt = recent[-1][0] - recent[0][0]
         if r_dt >= 1:
             r_dec = sum(_g(t_p, "llamacpp:gen_delta") or 0 for _t, t_p in recent)
@@ -3178,6 +3206,7 @@ def api_metrics(window_s, live_only=False):
     live_only=True drops engines without /metrics (the /metrics page renders
     those on the engines page, not here)."""
     m = state.get("metrics") or {}
+    _raw, cfg, _err = catalog.read_config()
     hw_for_net = gpu_hw()
     host = {
         "cpu_pct": m.get("cpu_pct"),
@@ -3193,6 +3222,8 @@ def api_metrics(window_s, live_only=False):
            "host": host}
     in_t = out_t = computed_t = 0
     saw_tok = False
+    e_by_port = {int(e["port"]): e for e in cfg.get("engines", [])
+                 if e.get("port")}
     with eng_metrics["lock"]:
         for port, st in sorted(eng_metrics["engines"].items()):
             if live_only and not st.get("has_metrics"):
@@ -3212,7 +3243,12 @@ def api_metrics(window_s, live_only=False):
             if st.get("has_metrics"):
                 e["stats"] = _window_stats(st, window_s)
                 e["series"] = _engine_series(st, window_s)
-                e["spec"] = _engine_spec(port, window_s, e["stats"])
+                # A sidecar fronts the lane port after cutover — spec
+                # detection (process cmdline / TabbyAPI YAML) must probe the
+                # ENGINE port, not the proxy.
+                e["spec"] = _engine_spec(
+                    e_by_port.get(port, {}).get("engine_port") or port,
+                    window_s, e["stats"])
                 e["slot_series"] = e["series"].get("slot_series")
                 e["slot_live"] = _live_slot_state(st)
                 if e["stats"].get("in_tokens") is not None:
@@ -3805,7 +3841,15 @@ def _engine_spec(port, window_s, stats=None):
             "n_tasks": None,
             "accepted": None, "generated": None,
             "mean_len": (stats or {}).get("spec_mean_len"),
-            "unit": _proc_unit(proc["pid"]), "source": "journal",
+            "unit": _proc_unit(proc["pid"]),
+            # source 'metrics', not 'journal': the UI renders journal sources
+            # as per-task rows (n_tasks/accepted/generated), which TabbyAPI
+            # counters never carry. The metrics branch shows the aggregate
+            # acceptance + mean accepted length, which is what we have.
+            "source": "metrics",
+            "detail": (f"drafts up to {n} tokens per step — acceptance is "
+                       f"accepted/drafted over the window (sidecar counters, "
+                       f"verified 1:1 against engine usage blocks)"),
         }
     acc = (stats or {}).get("spec_acceptance")
     if acc is None:

@@ -1256,7 +1256,7 @@ function renderPanels(eng,hist,d){
   }else if(!sp.length){
     setText('sp-title','SPEC DECODE ACCEPTANCE');
     setInner('sp-wrap','<div class="spempty">'+(SPd&&SPd.source==='metrics'
-      ?'this backend exports no per-position counters (gauges only) — acceptance over the last decode batch: '+((SPd&&SPd.acceptance!=null)?SPd.acceptance.toFixed(1)+'%':'–')+' · mean accepted length '+(SPd&&SPd.mean_len!=null?SPd.mean_len.toFixed(2):'–')+' tok'
+      ?((SPd.acceptance!=null?SPd.acceptance.toFixed(1)+'% accepted / drafted over the window':'acceptance –')+(SPd.detail?'<br>'+esc(SPd.detail):''))
       :(SPd?'spec enabled · no traffic in window (per-position appears after requests complete)':'no speculative decoding active in window'))+'</div>');
   }else{
     setText('sp-title','SPEC DECODE ACCEPTANCE');
