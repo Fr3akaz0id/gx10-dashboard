@@ -41,6 +41,8 @@ import engines_write
 import catalog
 import promparse
 import metadb
+import exl3metrics
+import exl3native
 
 HOST = "0.0.0.0"
 PORT = 9000
@@ -671,8 +673,94 @@ def _with_ds4_aliases(parsed):
     return parsed
 
 
+# EXL3 (TabbyAPI + exllamav3): no /metrics surface — the journal bridge
+# synthesizes vLLM-shaped samples instead. Same gate field as the vLLM live
+# rate estimator: presence of exl3:* signatures marks the lane.
+_EXL3_UNITS = {}   # engine name -> systemd unit (populated per scrape loop)
+_EXL3_STORES = {}  # unit name -> Exl3Store
+
+
+def _with_exl3_aliases(parsed):
+    """Map the journal bridge's exl3:* namespace onto the vLLM-shaped names
+    the generic pipeline reads, so _window_stats/_engine_series/_to_db_row
+    and the ledger consume EXL3 lanes with no per-engine branches (same shim
+    pattern as _with_sglang_aliases / _with_ds4_aliases).
+
+    Honest gaps stay absent (never fabricated): KV occupancy (no readout in
+    the engine), live queue depth (tabby logs queue retrospectively only),
+    per-position spec acceptance, HTTP status rates, preemptions.
+    request_success_total keeps its partial finish split — stated clauses
+    plus the unlabelled remainder ('?' semantics live in the bridge)."""
+    ctr, g, h = (parsed.get("counters", {}), parsed.get("gauges", {}),
+                 parsed.get("histograms", {}))
+
+    def _copy(src, dst, table):
+        if src in table and dst not in table:
+            table[dst] = dict(table[src])
+
+    for src, dst in (
+            ("exl3:prompt_tokens_total", "vllm:prompt_tokens_total"),
+            (exl3metrics.SIGNATURE, "vllm:generation_tokens_total"),
+            ("exl3:requests_completed_total", "vllm:num_requests_total"),
+            ("exl3:prefix_cache_hits_total", "vllm:prefix_cache_hits_total"),
+            ("exl3:prefix_cache_queries_total", "vllm:prefix_cache_queries_total"),
+            ("exl3:spec_decode_accepted_total", "vllm:spec_decode_num_accepted_tokens_total"),
+            ("exl3:spec_decode_draft_total", "vllm:spec_decode_num_draft_tokens_total"),
+            ("exl3:request_success_total", "vllm:request_success_total"),
+            ("exl3:prompt_tokens_by_source_total", "vllm:prompt_tokens_by_source_total"),
+    ):
+        _copy(src, dst, ctr)
+    for src, dst in (
+            ("exl3:predict_seconds", "vllm:predicted_tokens_seconds"),
+            ("exl3:prompt_seconds", "vllm:prompt_seconds"),
+            ("exl3:num_requests_running", "vllm:num_requests_running"),
+            ("exl3:num_requests_waiting", "vllm:num_requests_waiting"),
+    ):
+        _copy(src, dst, g)
+    for src, dst in (
+            ("exl3:time_to_first_token_seconds", "vllm:time_to_first_token_seconds"),
+            ("exl3:e2e_request_latency_seconds", "vllm:e2e_request_latency_seconds"),
+            ("exl3:inter_token_latency_seconds", "vllm:inter_token_latency_seconds"),
+            ("exl3:request_queue_time_seconds", "vllm:request_queue_time_seconds"),
+            ("exl3:request_generation_tokens", "vllm:request_generation_tokens"),
+            ("exl3:request_prefill_kv_computed_tokens", "vllm:request_prefill_kv_computed_tokens"),
+            ("exl3:request_decode_time_seconds", "vllm:request_decode_time_seconds"),
+            ("exl3:request_prefill_time_seconds", "vllm:request_prefill_time_seconds"),
+    ):
+        _copy(src, dst, h)
+    return parsed
+
 def _is_ds4_sample(sample):
     return "ds4_tokens_decoded_total" in (sample or {}).get("counters", {})
+
+
+def _is_exl3_sample(sample):
+    return exl3metrics.SIGNATURE in (sample or {}).get("counters", {})
+
+
+def _is_tabby_proc(args):
+    """TabbyAPI server process: venv python + tabbyAPI/main.py --config.
+    The backend arg value would be authoritative for llama-style servers;
+    TabbyAPI carries it only in the YAML config, so the script path is the
+    signature (verified against the live cyberfrost lane cmdline)."""
+    joined = " ".join(str(a) for a in (args or []))
+    return "tabbyAPI/main.py" in joined
+
+
+def _tabby_cfg_path(args):
+    """--config <path> from the TabbyAPI cmdline (draft_spec reads the YAML)."""
+    return _arg(args, "--config")
+
+
+def _tabby_cfg_port(cfg_path):
+    """Listen port from a TabbyAPI YAML (runtime.port / host.port)."""
+    try:
+        with open(cfg_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read(65536)
+        m = re.search(r"^\s*port:\s*(\d+)", text, re.M)
+        return int(m.group(1)) if m else None
+    except OSError:
+        return None
 
 
 def _is_sglang_sample(sample):
@@ -708,14 +796,40 @@ def scrape_engines():
         port = e.get("port")
         if port:
             ports[int(port)] = e
-    # The lock used to wrap the whole loop INCLUDING urlopen() against every
-    # engine, so N engines timing out at 1.5s each froze every reader of this
-    # state — /api/metrics and the DB flush included. A/B measured with ten
-    # engines hanging: longest reader wait 5.999s -> 0.000s. Now the lock is
-    # taken only to create/refresh the per-engine dicts and to prune, and all
-    # network I/O happens with it released. The collector is the only writer
-    # of these dicts, so per-engine mutation needs no lock; the lock exists
-    # to stop readers seeing a half-built engines mapping.
+    # EXL3 lanes register their unit before the loop; reconciled after.
+    exl3_units = {}
+    # Decide by the LIVE process on the port, not by unit text: a native
+    # serve_native.py lane has no Prometheus surface at all, so the generic
+    # /metrics loop below can never see it. _engine_proc is the existing
+    # port->process resolver and matches the live probe to a running server.
+    for e in cfg.get("engines", []):
+        if not e.get("enabled", True):
+            continue
+        port = e.get("port")
+        if not port:
+            continue
+        pr = _engine_proc(int(port))
+        args = (pr or {}).get("args") or []
+        # Two journal-grammar families, both exl3: serve_native.py (JSON
+        # lines, exl3native) and TabbyAPI (prose lines, exl3metrics).
+        if any("serve_native.py" in str(a) for a in args):
+            grammar = "native"
+        elif _is_tabby_proc(args):
+            grammar = "tabby"
+        else:
+            continue
+        unit = e.get("name") or ""
+        exl3_units[int(port)] = (unit, e.get("label") or unit, grammar)
+    # ── PHASE 1: state skeleton only (no I/O) ───────────────────
+    # The lock used to wrap the whole loop INCLUDING urlopen() against
+    # every engine. With N engines timing out at 1.5s each, /api/metrics
+    # and the 30s DB flush blocked for N*1.5s — measured 30s with ten wedged
+    # engines, while the browser refreshes every 5s. Now: take the lock only
+    # to create/refresh the per-engine dicts, do all network I/O outside it,
+    # then take it again briefly to publish results. The dicts are mutated
+    # only by this single collector thread, so per-engine writes need no
+    # lock at all; the lock exists to keep readers from seeing a half-built
+    # engines mapping.
     with eng_metrics["lock"]:
         for port, e in ports.items():
             st = eng_metrics["engines"].setdefault(port, {
@@ -727,11 +841,28 @@ def scrape_engines():
             st["label"] = e.get("label") or e.get("name")
             st["kind"] = e.get("kind", "unit")
             st["model"] = e.get("model")
-        known = set(ports)
+        # EXL3 lanes (native or TabbyAPI): no /metrics surface,
+        # journal-synthesised sample.
+        for port, (unit, label, _grammar) in exl3_units.items():
+            st = eng_metrics["engines"].setdefault(port, {
+                "samples": deque(maxlen=METRICS_WIN), "up": False,
+                "has_metrics": False, "model_live": None,
+                "label": label, "kind": "unit", "model": None, "port": port,
+            })
+            st["label"] = label
+            st["kind"] = "unit"
+        known = set(ports) | set(exl3_units)
         for p in [p for p in eng_metrics["engines"] if p not in known]:
             del eng_metrics["engines"][p]
 
+    # ── PHASE 2: network + derive, NO LOCK HELD ─────────────────
     for port, e in ports.items():
+        if port in exl3_units:
+            # journal-grammar lane: no /metrics surface. Probing one here
+            # nils has_metrics/model_live and the exl3 bridge at the end of
+            # the pass only restores them — /api/metrics reads can land in
+            # the torn window and blank every card ("loses data on refresh").
+            continue
         st = eng_metrics["engines"].get(port)
         if st is None:
             continue
@@ -744,6 +875,7 @@ def scrape_engines():
             parsed = _with_llamacpp_aliases(parsed)
             parsed = _with_sglang_aliases(parsed)
             parsed = _with_ds4_aliases(parsed)
+            parsed = _with_exl3_aliases(parsed)
             st["samples"].append((time.time(), parsed))
             st["up"] = True
             st["has_metrics"] = True
@@ -767,41 +899,87 @@ def scrape_engines():
                 st["up"] = True
             except Exception:
                 st["up"] = False
-        # PER-ENGINE derive work. A throw here used to abort the whole loop,
-        # so every LATER engine silently got no sample, and because collect()
-        # swallows the exception the tiles just kept serving the last good
-        # value with no staleness marker. Engines are iterated in config
-        # order, so the damage was positional and looked like "some lanes
-        # are idle".
+        # Everything below is PER-ENGINE work: _model_identity (-> _engine_proc,
+        # a full /proc scan), _update_slots and _slot_capacity. One throw here
+        # used to abort the whole loop, so every LATER engine silently got no
+        # sample — and because collect() swallows the exception, the tiles
+        # kept serving the last good value with no staleness marker. Engines
+        # are iterated in config order, so the damage was positional and looked
+        # like "some lanes are idle".
         try:
-            # model identity for the ledger: (model base, version, engine) —
-            # composite key, see _model_identity. Computed every scrape so a
-            # model/quant/engine swap on the port is attributed within one
-            # poll. `model_key` = the composite key (used by the reset API
-            # and data-management rebases).
+            # model identity for the ledger: (model base, version, engine)
+            # — composite key, see _model_identity. Computed every scrape
+            # so a model/quant/engine swap on the port is attributed
+            # within one poll. `model_key` = the composite key (used by
+            # the reset API and data-management rebases).
             if not st.get("model_live"):
                 # llama.cpp emits no model_name label — its only source is
                 # the process --model/-m/--model-path filename
                 proc = _engine_proc(port)
                 if proc:
-                    m = _arg(proc["args"], "--model") or _arg(proc["args"], "-m") \
+                    m = _arg(proc["args"], "--model") \
+                        or _arg(proc["args"], "-m") \
                         or _arg(proc["args"], "--model-path")
                     st["model_cmdline"] = os.path.basename(m) if m else None
             ident = _model_identity(port, st)
             st["model_identity"] = ident
             st["model_key"] = ident["key"]
             st["backend"] = ident["engine"].split(":")[0]
-            if st.get("has_metrics") and parsed and "llamacpp:prompt_tokens_total" in parsed.get("counters", {}):
-                _update_slots(st)  # llama.cpp: kv occupancy + prefix reuse live in /slots
+            if st.get("has_metrics") and parsed and \
+                    "llamacpp:prompt_tokens_total" in parsed.get("counters", {}):
+                # llama.cpp: kv occupancy + prefix reuse live in /slots
+                _update_slots(st)
             # slot capacity (concurrent request slots) for the utilization
-            # view. llama's _update_slots just populated st["n_slots"] above,
-            # so it must run after that; backend reused from _model_identity.
-            st["slot_cap"] = _slot_capacity(port, st, ident["engine"].split(":")[0])
+            # view. llama's _update_slots just populated st["n_slots"],
+            # so it must run after that.
+            st["slot_cap"] = _slot_capacity(
+                port, st, ident["engine"].split(":")[0])
         except Exception as _e:
-            # Isolate the failure to THIS engine and keep its sample.
+            # Isolate the failure to THIS engine: keep its sample, record
+            # why the derived fields are missing, and let the loop go on
+            # to the next engine.
             st["derive_error"] = f"{type(_e).__name__}: {_e}"[:200]
+            import traceback as _tb
+            dlog(f"derive failed for port {port}: {_tb.format_exc()}")
         else:
             st.pop("derive_error", None)
+
+    # EXL3 lanes: no /metrics surface, journal-synthesised sample. The
+    # bridge owns st["up"]/st["has_metrics"]; the caller keeps st["samples"],
+    # so a bridge-side setdefault must never clobber it.
+    for port, (unit, label, grammar) in exl3_units.items():
+        st = eng_metrics["engines"].get(port)
+        if st is None:
+            continue
+        try:
+            cursor = f"/var/lib/gx10-dashboard/{unit}.cursor"
+            os.makedirs(os.path.dirname(cursor), exist_ok=True)
+            if grammar == "tabby":
+                # TabbyAPI slot cap: /props total_slots (CLI max_batch_size),
+                # cached inside the bridge across restarts.
+                parsed = exl3metrics.scrape_lane(port, unit, st, cursor)
+                if st.get("up") and not st.get("model_live"):
+                    # Ledger identity: the pack dir the engine really
+                    # serves (TabbyAPI emits no model_name label).
+                    raw = urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/props", timeout=1.5).read()
+                    mp = json.loads(raw.decode("utf-8", "replace")).get("model_path")
+                    if mp:
+                        st["model_live"] = os.path.basename(mp.rstrip("/"))
+            else:
+                parsed = exl3native.scrape_lane(port, unit, st, cursor)
+            if parsed is not None:
+                parsed = _with_exl3_aliases(parsed)
+                st["samples"].append((time.time(), parsed))
+        except Exception:
+            st["has_metrics"] = st.get("has_metrics", False)
+        st["model_identity"] = _model_identity(port, st)
+        st["model_key"] = st["model_identity"]["key"]
+        st["backend"] = st["model_identity"]["engine"].split(":")[0]
+        st["slot_cap"] = _slot_capacity(
+            port, st, st["model_identity"]["engine"].split(":")[0])
+
+
 def _update_slots(st):
     """llama.cpp /slots — the only source for KV occupancy + prefix reuse.
     /metrics (hardcoded server-side) exposes neither.
@@ -2773,7 +2951,7 @@ def _safe_docker_name(name):
 def _systemctl_argv(*args):
     """systemctl argv, prefixed with sudo when we are not already root.
 
-    The service runs as a non-root user with NOPASSWD sudo, so without the
+    The service runs as `frank` (uid 1000) with NOPASSWD sudo, so without the
     prefix every lifecycle button failed with "Interactive authentication
     required" while the UI reported a generic error. Under a non-sudo user the
     prefix is skipped and systemctl simply fails as before.
@@ -2930,7 +3108,7 @@ def api_metrics(window_s, live_only=False):
     out = {"window_s": window_s, "refresh_s": POLL_S, "engines": [],
            "gpu_hw": gpu_hw(), "gpu_series": gpu_hw_series(window_s),
            "host": host}
-    in_t = out_t = 0
+    in_t = out_t = computed_t = 0
     saw_tok = False
     with eng_metrics["lock"]:
         for port, st in sorted(eng_metrics["engines"].items()):
@@ -2956,11 +3134,18 @@ def api_metrics(window_s, live_only=False):
                 e["slot_live"] = _live_slot_state(st)
                 if e["stats"].get("in_tokens") is not None:
                     in_t += e["stats"]["in_tokens"]; saw_tok = True
+                    # computed (uncached) input share, same basis as the
+                    # DB-side query_token_sums: cache hits are KV re-reads
+                    cn = e["stats"].get("prompt_cached_pct")
+                    if cn is None:
+                        cn = 0.0
+                    computed_t += e["stats"]["in_tokens"] * (1.0 - cn / 100.0)
                 if e["stats"].get("out_tokens") is not None:
                     out_t += e["stats"]["out_tokens"]; saw_tok = True
             out["engines"].append(e)
     out["cost"] = _cost_block(in_t if saw_tok else 0, out_t if saw_tok else 0,
-                              _energy_kwh_from_ring(window_s))
+                              _energy_kwh_from_ring(window_s),
+                              computed_in_tokens=computed_t if saw_tok else None)
     # "today" strip replaces the windowed cost strip's reset-per-window
     # behavior; all-time meter comes from the ledger
     ct = _cost_today()
@@ -3103,6 +3288,16 @@ def _engine_proc(port):
                      "base": os.path.basename(args[0] or ""),
                      "container": container}
             break
+        # TabbyAPI carries no --port flag: the listen port lives in the
+        # YAML config. Match the script signature and confirm the port
+        # from the config file itself (stdlib line scan), so only the
+        # lane ACTUALLY listening on `port` is credited.
+        if found is None and _is_tabby_proc(args):
+            cfg = _tabby_cfg_path(args)
+            if cfg and _tabby_cfg_port(cfg) == int(port):
+                found = {"pid": int(d), "args": args,
+                         "base": os.path.basename(args[0] or ""),
+                         "container": container}
     _PROC_CACHE[port] = (time.time(), found)
     if len(_PROC_CACHE) > 32:
         _PROC_CACHE.clear()
@@ -3262,6 +3457,8 @@ def _live_backend(port, st, model_cfg):
             backend = "sglang"
         elif _is_ds4_sample(last_p):
             backend = "ds4"
+        elif _is_exl3_sample(last_p):
+            backend = "exl3"
         else:
             backend = "vllm"
     proc = _engine_proc(port) if port else None
@@ -3273,6 +3470,11 @@ def _live_backend(port, st, model_cfg):
             backend = "sglang"
         if backend == "unknown" and "llama-server" in proc["base"]:
             backend = "llama"
+        # TabbyAPI: the venv python + tabbyAPI/main.py signature. The engine
+        # has no /metrics surface, so the sample branch above never sees it
+        # while the lane is up but idle (no journal rows yet).
+        if backend == "unknown" and _is_tabby_proc(proc["args"]):
+            backend = "exl3"
     if backend == "unknown" and model_cfg is not None:
         # a configured engine that answered /v1/models: the id/owned_by
         # tells us the serving engine (owned_by=="sglang" is definitive)
@@ -3311,6 +3513,18 @@ def _slot_capacity(port, st, backend):
     # the cmdline flag.
     if backend == "llama" and st and st.get("n_slots"):
         return int(st["n_slots"])
+    if backend == "exl3":
+        # TabbyAPI exposes total_slots on /props (the max_batch_size the CLI
+        # applied) — the cmdline carries no slot flag to read.
+        try:
+            raw = urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/props", timeout=1.5).read()
+            ts = json.loads(raw.decode("utf-8", "replace")).get("total_slots")
+            if ts:
+                return int(ts)
+        except Exception:
+            pass
+        return None
     proc = _engine_proc(port) if port else None
     if not proc:
         return None
@@ -3484,6 +3698,24 @@ def _engine_spec(port, window_s, stats=None):
             "unit": _proc_unit(proc["pid"]),
             "source": "metrics",
         }
+    # TabbyAPI: spec tech comes from the YAML (draft_model.draft_mode) —
+    # counter presence is false-positive-prone (an idle drafter emits none).
+    if _is_tabby_proc(args):
+        mode, n = exl3metrics.draft_spec(_tabby_cfg_path(args))
+        if not mode:
+            return None
+        acc = (stats or {}).get("spec_acceptance")
+        return {
+            "acceptance": acc,
+            "tech": str(mode).upper(),
+            "spec_type": str(mode),
+            "alias": None,
+            "n_max": n,
+            "n_tasks": None,
+            "accepted": None, "generated": None,
+            "mean_len": (stats or {}).get("spec_mean_len"),
+            "unit": _proc_unit(proc["pid"]), "source": "journal",
+        }
     acc = (stats or {}).get("spec_acceptance")
     if acc is None:
         return None
@@ -3499,9 +3731,16 @@ def _engine_spec(port, window_s, stats=None):
 HIST_SPANS = (3600, 86400, 604800)
 
 
-def _cost_block(in_tokens, out_tokens, energy_kwh):
+def _cost_block(in_tokens, out_tokens, energy_kwh, computed_in_tokens=None):
     """Cloud SKU $ vs local DGX energy $ for the same token work.
-    SKU price = (in_tok/1e6 * in_price + out_tok/1e6 * out_price);
+    SKU price = (computed_in_tok/1e6 * in_price + out_tok/1e6 * out_price).
+    PRICING BASE: computed (uncached) input tokens. Prefix-cache hits are
+    KV re-reads — a cloud SKU bills them at a fraction of input price or
+    not at all, and locally they cost no prefill compute; pricing raw
+    prompt totals would bill re-read context like 130k-token standing
+    prompts as fresh work (overstating cloud cost ~100x when cache is hot).
+    computed_in_tokens=None falls back to raw (callers without cache
+    telemetry) and the UI label says so.
     energy $ = kWh * usd_per_kwh. Returns {} when cost is unconfigured.
     in/out tokens and energy_kwh are window totals (caller supplies them)."""
     _raw, cfg, _err = catalog.read_config()
@@ -3519,7 +3758,9 @@ def _cost_block(in_tokens, out_tokens, energy_kwh):
     }
     if energy_kwh is not None and cost.get("usd_per_kwh") is not None:
         out["energy_usd"] = round(energy_kwh * cost["usd_per_kwh"], 4)
-    it = (in_tokens or 0) / 1e6
+    price_in = computed_in_tokens if computed_in_tokens is not None else in_tokens
+    out["computed_in_tokens"] = price_in
+    it = (price_in or 0) / 1e6
     ot = (out_tokens or 0) / 1e6
     for s in cost.get("skus", []):
         out["skus"].append({
@@ -3550,7 +3791,8 @@ def _cost_today():
             energy = metadb.query_energy_kwh(c, since)
         finally:
             c.close()
-        return _cost_block(fleet["in_tokens"], fleet["out_tokens"], energy)
+        return _cost_block(fleet["in_tokens"], fleet["out_tokens"], energy,
+                           computed_in_tokens=fleet.get("computed_in_tokens"))
     except Exception:
         return None
 
@@ -3641,7 +3883,7 @@ def api_metrics_history(port, span_s):
         tok = metadb.query_token_sums(c, port, since)          # port-scoped -> tiles
         fleet = metadb.query_token_sums(c, None, since)        # all engines -> cost
         energy = metadb.query_energy_kwh(c, since)
-        model = rows[-1]["model"] if rows else None
+    
     finally:
         c.close()
     # A port's window can span a MODEL SWITCH: same endpoint, different model
@@ -3747,7 +3989,8 @@ def api_metrics_history(port, span_s):
             # Cost strip is fleet-wide (matches the live path: it sums every
             # live engine and integrates whole-GPU power), so bill it on the
             # all-engine token sums, not the selected port's.
-            "cost": _cost_block(fleet["in_tokens"], fleet["out_tokens"], energy)}
+            "cost": _cost_block(fleet["in_tokens"], fleet["out_tokens"], energy,
+                                computed_in_tokens=fleet.get("computed_in_tokens"))}
     ct = _cost_today()
     if ct is not None:
         resp["cost_today"] = ct

@@ -78,6 +78,7 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .eback.vllm{color:var(--gf-orange);border-color:color-mix(in srgb,var(--gf-orange) 50%,transparent)}
 .eback.sglang{color:var(--gf-gold);border-color:color-mix(in srgb,var(--gf-gold) 50%,transparent)}
 .eback.ds4{color:#c678dd;border-color:color-mix(in srgb,#c678dd 50%,transparent)}
+.eback.exl3{color:#56b6c2;border-color:color-mix(in srgb,#56b6c2 50%,transparent)}
 .eback.unknown{color:var(--gf-dim);border-color:var(--gf-edge)}
 .tmute{color:var(--gf-dim);font-size:11px}
 
@@ -769,7 +770,7 @@ function stripName(e){
   return {full:nm,short:nm.length>30?nm.slice(0,29)+'…':nm};
 }
 function chipLabel(e){
-  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang'||e.backend==='ds4')?e.backend:'?';
+  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang'||e.backend==='ds4'||e.backend==='exl3')?e.backend:'?';
   var nm=stripName(e).short;
   return b+' · '+esc(nm)+' · :'+e.port+(e.has_metrics?'':' · no metrics');
 }
@@ -863,6 +864,9 @@ function renderMeters(d){
     setText('tv-today-mid',mid?fmtMoney(mid.usd):'–');
     setText('tv-today-low',low?fmtMoney(low.usd):'–');
     var tokSub='since local midnight · '+fmtTok(ct.in_tokens)+' in · '+fmtTok(ct.out_tokens)+' out';
+    if(ct.computed_in_tokens!=null&&ct.computed_in_tokens<ct.in_tokens){
+      tokSub+=' · '+fmtTok(ct.computed_in_tokens)+' computed (rest cache hits)';
+    }
     setText('ts-today-u',tokSub);
     setText('ts-today-m',tokSub);
     setText('ts-today-l',tokSub);
@@ -1658,8 +1662,12 @@ function renderSlots(eng,hist,d){
   var cap=null,run=0,wait=0,seats=[],busy=[],orate=null,rsrc=null;
   var series=null,flips=[];
   var kpi=null;
+  /* L is shared: the concurrency-meter branch below reads L.req_rate in
+     BOTH live and history mode. History responses carry no slot_live, so
+     default to {} — the meter renders without the lane-mean line instead
+     of throwing (the TypeError killed every history view >1h). */
+  var L=eng&&eng.slot_live?eng.slot_live:{};
   if(!hist&&eng&&eng.slot_live){
-    var L=eng.slot_live;
     cap=L.cap;run=L.run;wait=L.wait;seats=L.seats||[];busy=L.busy||[];rsrc=L.src||null;
     series=eng.slot_series||null;
     var st=eng.stats||{};

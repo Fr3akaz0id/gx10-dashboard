@@ -247,14 +247,23 @@ def query_gpu(c, since_ts, limit=1440):
 
 
 def query_token_sums(c, port, since_ts):
-    """Sum in/out tokens over the window (all engines, or one port)."""
-    if port is None:
-        r = c.execute("SELECT COALESCE(SUM(in_tokens),0) AS i, COALESCE(SUM(out_tokens),0) AS o "
-                      "FROM samples WHERE ts>=?", (since_ts,)).fetchone()
+    """Sum in/out tokens over the window (all engines, or one port).
+
+    computed_in_tokens is the share of input that had to be NEWLY
+    PROCESSED (prompt tokens minus the prefix-cache hit): cache hits
+    re-read the KV instead of paying prefill again, so this is the
+    number that tracks real compute — and real cost. Null
+    prompt_cached_pct rows count as 0% cached (conservative)."""
+    sql = ("SELECT COALESCE(SUM(in_tokens),0) AS i, COALESCE(SUM(out_tokens),0) AS o, "
+           "COALESCE(SUM(in_tokens*(1-COALESCE(prompt_cached_pct,0)/100.0)),0) AS cn "
+           "FROM samples WHERE ts>=?")
+    if port is not None:
+        sql = sql.replace("WHERE ts>=?", "WHERE port=? AND ts>=?")
+        r = c.execute(sql, (port, since_ts)).fetchone()
     else:
-        r = c.execute("SELECT COALESCE(SUM(in_tokens),0) AS i, COALESCE(SUM(out_tokens),0) AS o "
-                      "FROM samples WHERE port=? AND ts>=?", (port, since_ts)).fetchone()
-    return {"in_tokens": int(r["i"] or 0), "out_tokens": int(r["o"] or 0)}
+        r = c.execute(sql, (since_ts,)).fetchone()
+    return {"in_tokens": int(r["i"] or 0), "out_tokens": int(r["o"] or 0),
+            "computed_in_tokens": int(r["cn"] or 0)}
 
 
 def query_energy_kwh(c, since_ts):
@@ -431,9 +440,10 @@ def model_ledger_update(c, port, key, model, version, engine, in_total, out_tota
     first = row["first_ts"] if row else now
     if in_total is not None:
         if w_in is None:
-            # first-ever observation on this port: lifetime counter, flagged
+            # first-ever observation on this port: the engine counter is the
+            # PROCESS lifetime and one process serves one model, so the
+            # tokens are attributable — count them, no initial mark.
             c_in += in_total
-            c_ini += in_total
         elif in_total < w_in:
             # counter reset (engine restart)
             c_in += in_total
@@ -446,8 +456,8 @@ def model_ledger_update(c, port, key, model, version, engine, in_total, out_tota
         w_in = in_total
     if out_total is not None:
         if w_out is None:
+            # attributable process-lifetime counter — count, no initial mark
             c_out += out_total
-            c_ini_o += out_total
         elif out_total < w_out:
             c_out += out_total
             if not same:
