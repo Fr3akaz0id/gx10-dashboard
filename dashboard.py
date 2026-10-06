@@ -3516,14 +3516,22 @@ def _slot_capacity(port, st, backend):
     if backend == "exl3":
         # TabbyAPI exposes total_slots on /props (the max_batch_size the CLI
         # applied) — the cmdline carries no slot flag to read.
+        # /props serializes behind active generation (same stall class as
+        # /health): under batched load the 1.5 s probe times out and the
+        # card flips to "lane not reporting slot capacity". The cap only
+        # changes on restart/config edit, so keep the last known value.
         try:
             raw = urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/props", timeout=1.5).read()
             ts = json.loads(raw.decode("utf-8", "replace")).get("total_slots")
             if ts:
+                if st is not None:
+                    st["_slot_cap_cache"] = int(ts)
                 return int(ts)
         except Exception:
             pass
+        if st is not None and st.get("_slot_cap_cache"):
+            return st["_slot_cap_cache"]
         return None
     proc = _engine_proc(port) if port else None
     if not proc:

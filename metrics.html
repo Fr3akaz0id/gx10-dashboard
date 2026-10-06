@@ -116,7 +116,7 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .tile .tt{font-size:10px;text-transform:uppercase;letter-spacing:1.4px;color:var(--gf-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile .tv{font-family:var(--font-data);font-size:24px;font-weight:700;line-height:1.25;color:var(--gf-gold)}
 .tile.energy .tv{color:var(--gf-bright)}
-.tile .ts{font-size:10px;color:var(--gf-dim);font-family:var(--font-data);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .ts{font-size:10px;color:var(--gf-dim);font-family:var(--font-data);white-space:normal;overflow-wrap:anywhere;line-height:1.45}
 
 /* row 1 — stat + sparkline cards */
 #row1 .stat{background:var(--gf-card);border:1px solid var(--gf-edge);border-radius:var(--radius);
@@ -865,11 +865,11 @@ function renderMeters(d){
     setText('tv-today-low',low?fmtMoney(low.usd):'–');
     var tokSub='since local midnight · '+fmtTok(ct.in_tokens)+' in · '+fmtTok(ct.out_tokens)+' out';
     if(ct.computed_in_tokens!=null&&ct.computed_in_tokens<ct.in_tokens){
-      tokSub+=' · '+fmtTok(ct.computed_in_tokens)+' computed (rest cache hits)';
+      tokSub+='<br>'+fmtTok(ct.computed_in_tokens)+' computed · '+fmtTok(ct.in_tokens-ct.computed_in_tokens)+' cache hits';
     }
-    setText('ts-today-u',tokSub);
-    setText('ts-today-m',tokSub);
-    setText('ts-today-l',tokSub);
+    setInner('ts-today-u',tokSub);
+    setInner('ts-today-m',tokSub);
+    setInner('ts-today-l',tokSub);
     if(ct.energy_usd!=null){
       setText('tv-today-energy',fmtMoney(ct.energy_usd));
       setText('ts-today-e',(ct.energy_kwh!=null?ct.energy_kwh.toFixed(4):'–')+' kWh'
