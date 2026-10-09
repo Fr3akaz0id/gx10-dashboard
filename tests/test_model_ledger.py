@@ -119,12 +119,40 @@ r = metadb.model_ledger_all(c)[0]
 assert (r["first_ts"], r["last_ts"]) == (1000, 9000), r
 c.close()
 
-# 8. None counters: no-op, state untouched
+# 8. None counters: no-op, state untouched (incl. last_ts — an idle/down
+#    lane's row must NOT heartbeat, or the statistics page's 30-min
+#    "on metrics" pill lies for a frozen-total lane)
 c = fresh()
 k = K("m", "v", "sglang:8003")
 metadb.model_ledger_update(c, 8003, k, "m", "v", "sglang:8003", 10.0, 1.0, ts=1000)
 metadb.model_ledger_update(c, 8003, k, "m", "v", "sglang:8003", None, None, ts=1030)
 assert metadb.model_ledger_all(c)[0]["in_tokens"] == 10
+assert metadb.model_ledger_all(c)[0]["last_ts"] == 1000, "None counters advanced last_ts"
+c.close()
+
+# 9. ZERO-Delta credit (an overlay fronting a dead engine serves /metrics
+#    counters with zero traffic): tokens unchanged AND last_ts frozen.
+#    last_ts may only advance when >0 tokens were actually credited —
+#    otherwise every zero-flush stamps now and the 30-min "on metrics"
+#    pill shows a frozen lane as live forever.
+c = fresh()
+k = K("frost", "v", "exl3:8899")
+metadb.model_ledger_update(c, 8899, k, "frost", "v", "exl3:8899", 5_000_000.0, 5_000.0, ts=1000)
+metadb.model_ledger_update(c, 8899, k, "frost", "v", "exl3:8899", 5_000_000.0, 5_000.0, ts=1030)
+metadb.model_ledger_update(c, 8899, k, "frost", "v", "exl3:8899", 5_000_000.0, 5_000.0, ts=9000)
+r = metadb.model_ledger_all(c)[0]
+assert (r["in_tokens"], r["out_tokens"]) == (5_000_000, 5_000), r
+assert (r["first_ts"], r["last_ts"]) == (1000, 1000), r
+# traffic resumes -> last_ts advances again on the next credit
+metadb.model_ledger_update(c, 8899, k, "frost", "v", "exl3:8899", 5_000_100.0, 5_000.0, ts=9100)
+r = metadb.model_ledger_all(c)[0]
+assert (r["first_ts"], r["last_ts"]) == (1000, 9100), r
+# counter RESET that credits nothing (reading 0 after restart): no advance.
+# A reset whose reading > 0 DID serve tokens -> advance (case 5's reset path).
+metadb.model_ledger_update(c, 8899, k, "frost", "v", "exl3:8899", 0.0, 0.0, ts=9200)
+r = metadb.model_ledger_all(c)[0]
+assert (r["in_tokens"], r["out_tokens"]) == (5_000_100, 5_000), r
+assert (r["first_ts"], r["last_ts"]) == (1000, 9100), r
 c.close()
 
 # ── dashboard identity helpers ────────────────────────────────

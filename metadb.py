@@ -431,13 +431,14 @@ def model_ledger_update(c, port, key, model, version, engine, in_total, out_tota
     w_in = wm["in_tokens_max"] if wm else None
     w_out = wm["out_tokens_max"] if wm else None
     row = c.execute("SELECT in_tokens_cum, out_tokens_cum, in_initial_cum, "
-                    "out_initial_cum, first_ts FROM model_ledger WHERE key=?",
-                    (key,)).fetchone()
+                    "out_initial_cum, first_ts, last_ts FROM model_ledger "
+                    "WHERE key=?", (key,)).fetchone()
     c_in = row["in_tokens_cum"] if row else 0.0
     c_out = row["out_tokens_cum"] if row else 0.0
     c_ini = row["in_initial_cum"] if row else 0.0
     c_ini_o = row["out_initial_cum"] if row else 0.0
     first = row["first_ts"] if row else now
+    prev_in, prev_out = c_in, c_out
     if in_total is not None:
         if w_in is None:
             # first-ever observation on this port: the engine counter is the
@@ -465,10 +466,16 @@ def model_ledger_update(c, port, key, model, version, engine, in_total, out_tota
         else:
             c_out += out_total - w_out
         w_out = out_total
+    # last_ts = last time this lane was SEEN SERVING, not last flush. A flush
+    # that credits zero tokens (dead engine behind a live /metrics overlay —
+    # e.g. a sidecar fronting an unloaded engine) must NOT heartbeat last_ts,
+    # or the 30-min "on metrics" liveness pill lies forever.
+    credited = (c_in + c_out) > (prev_in + prev_out)
+    last = now if (row is None or credited) else row["last_ts"]
     c.execute("INSERT OR REPLACE INTO model_ledger (key, model, version, engine, "
               "in_tokens_cum, out_tokens_cum, in_initial_cum, out_initial_cum, "
               "first_ts, last_ts) VALUES (?,?,?,?,?,?,?,?,?,?)",
-              (key, model, version, engine, c_in, c_out, c_ini, c_ini_o, first, now))
+              (key, model, version, engine, c_in, c_out, c_ini, c_ini_o, first, last))
     c.execute("INSERT OR REPLACE INTO model_watermarks (port, key, model, "
               "version, engine, in_tokens_max, out_tokens_max) VALUES (?,?,?,?,?,?,?)",
               (port, key, model, version, engine, w_in, w_out))
