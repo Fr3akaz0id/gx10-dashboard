@@ -20,7 +20,11 @@ def fresh():
 K = lambda model, version, engine: "\u0000".join([model, version or "?", engine])
 
 
-# 1. first-ever observation: lifetime counter credited, flagged initial
+# 1. first-ever observation: lifetime counter CREDITED, NOT flagged initial
+#    (rule changed 2026-10-06 by 4a6e06c: the engine counter is a PROCESS
+#    lifetime and one process serves one model, so the pre-dashboard tokens
+#    ARE attributable — initial marks only unattributable history, i.e. a
+#    counter reset coinciding with a key change).
 c = fresh()
 metadb.model_ledger_update(c, 8003, K("qwen3.8-27b", "recipe", "sglang:8003"),
                            "qwen3.8-27b", "recipe", "sglang:8003",
@@ -29,8 +33,8 @@ rows = metadb.model_ledger_all(c)
 assert len(rows) == 1, rows
 r = rows[0]
 assert (r["in_tokens"], r["out_tokens"]) == (7_000_000, 100_000), r
-assert (r["in_initial"], r["out_initial"]) == (7_000_000, 100_000), r
-assert (r["observed_in"], r["observed_out"]) == (0, 0), r
+assert (r["in_initial"], r["out_initial"]) == (0, 0), r
+assert (r["observed_in"], r["observed_out"]) == (7_000_000, 100_000), r
 assert r["version"] == "recipe" and r["engine"] == "sglang:8003", r
 c.close()
 
@@ -40,9 +44,11 @@ k1 = K("m", "v1", "sglang:8003")
 metadb.model_ledger_update(c, 8003, k1, "m", "v1", "sglang:8003", 1000.0, 50.0, ts=1000)
 metadb.model_ledger_update(c, 8003, k1, "m", "v1", "sglang:8003", 1500.0, 90.0, ts=1030)
 r = metadb.model_ledger_all(c)[0]
+# first observation is observed (not initial) since 4a6e06c, so initial=0
+# and observed covers the whole credited history.
 assert (r["in_tokens"], r["out_tokens"]) == (1500, 90), r
-assert (r["in_initial"], r["out_initial"]) == (1000, 50), r
-assert (r["observed_in"], r["observed_out"]) == (500, 40), r
+assert (r["in_initial"], r["out_initial"]) == (0, 0), r
+assert (r["observed_in"], r["observed_out"]) == (1500, 90), r
 c.close()
 
 # 3. KEY CHANGE without reset: only growth since previous watermark credited
@@ -79,15 +85,15 @@ assert bykey[k_old]["in_tokens"] == 9_000_000
 c.close()
 
 # 5. reset WITHOUT key change: new reading credited, NOT flagged
+#    (initial is 0: same key + attributable first observation since 4a6e06c)
 c = fresh()
 k = K("m", "v1", "ds4:8000")
 metadb.model_ledger_update(c, 8000, k, "m", "v1", "ds4:8000", 500_000.0, 10.0, ts=1000)
 metadb.model_ledger_update(c, 8000, k, "m", "v1", "ds4:8000", 20_000.0, 2.0, ts=1030)
 r = metadb.model_ledger_all(c)[0]
 assert (r["in_tokens"], r["out_tokens"]) == (520_000, 12), r
-# initial stays at the first-observation 500k; the restart 20k is observed
-assert (r["in_initial"], r["out_initial"]) == (500_000, 10), r
-assert (r["observed_in"], r["observed_out"]) == (20_000, 2), r
+assert (r["in_initial"], r["out_initial"]) == (0, 0), r
+assert (r["observed_in"], r["observed_out"]) == (520_000, 12), r
 c.close()
 
 # 6. two engines, same model base: separate rows (the whole point)

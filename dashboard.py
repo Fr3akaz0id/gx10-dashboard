@@ -3703,7 +3703,7 @@ def _live_backend(port, st, model_cfg):
             backend = "ds4"
         elif _is_tensorfold_sample(last_p):
             backend = "tensorfold"
-        elif _is_exl3_sample(last_p):
+        elif _is_exl3_sample(last_p) or _is_tabby_sidecar_sample(last_p):
             backend = "exl3"
         else:
             backend = "vllm"
