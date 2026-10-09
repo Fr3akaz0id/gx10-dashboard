@@ -736,6 +736,111 @@ def _is_ds4_sample(sample):
     return "ds4_tokens_decoded_total" in (sample or {}).get("counters", {})
 
 
+def _with_tensorfold_aliases(parsed):
+    # Map TensorFold /metrics (tensorfold:*) onto the vLLM-shaped names the
+    # generic pipeline reads, same shim pattern as _with_ds4_aliases. Verified
+    # against the live :8888 surface (2026-10-09): counters track the OpenAI
+    # usage block exactly, and TensorFold already publishes ttft/e2e/tpot and
+    # request_*_time histograms under vLLM names (prefix differs).
+    # Honest gaps: no prefix-cache surface, no kv capacity config gauge.
+    # KV percent comes from tensorfold:kv_cache_usage_ratio (pool level);
+    # take the max across pool label sets -- summing would overstate.
+    ctr, g = parsed.get("counters", {}), parsed.get("gauges", {})
+    for src, dst in (("tensorfold:prompt_tokens_total", "vllm:prompt_tokens_total"),
+                     ("tensorfold:generation_tokens_total", "vllm:generation_tokens_total"),
+                     ("tensorfold:spec_decode_num_draft_tokens_total", "vllm:spec_decode_num_draft_tokens_total"),
+                     ("tensorfold:spec_decode_num_accepted_tokens_total", "vllm:spec_decode_num_accepted_tokens_total"),
+                     ("tensorfold:preemptions_total", "vllm:num_preemptions_total")):
+        if src in ctr and dst not in ctr:
+            total = _sum_counter_table(parsed, src)
+            ctr[dst] = {"value": total, "labels": {},
+                        "series": [{"value": total, "labels": {}}]}
+    for src, dst in (("tensorfold:num_requests_running", "vllm:num_requests_running"),
+                     ("tensorfold:num_requests_waiting", "vllm:num_requests_waiting")):
+        if src in g and dst not in g:
+            g[dst] = dict(g[src])
+    if "tensorfold:kv_cache_usage_ratio" in g and "vllm:kv_cache_usage_perc" not in g:
+        ser = (g["tensorfold:kv_cache_usage_ratio"] or {}).get("series") or []
+        vals = [s.get("value") for s in ser if s.get("value") is not None]
+        if vals:
+            v = max(vals)
+            v = v * 100.0 if 0.0 <= v <= 1.0 else v
+            g["vllm:kv_cache_usage_perc"] = {"value": v, "labels": {}}
+    for src, dst in (("tensorfold:time_to_first_token_seconds", "vllm:time_to_first_token_seconds"),
+                     ("tensorfold:e2e_request_latency_seconds", "vllm:e2e_request_latency_seconds"),
+                     ("tensorfold:request_time_per_output_token_seconds", "vllm:request_time_per_output_token_seconds"),
+                     ("tensorfold:request_decode_time_seconds", "vllm:request_decode_time_seconds"),
+                     ("tensorfold:request_prefill_time_seconds", "vllm:request_prefill_time_seconds")):
+        _copy_hist(parsed, src, dst)
+    return parsed
+
+
+# EXL3 (TabbyAPI + exllamav3): no /metrics surface — the journal bridge
+# synthesizes vLLM-shaped samples instead. Same gate field as the vLLM live
+# rate estimator: presence of exl3:* signatures marks the lane.
+_EXL3_UNITS = {}   # engine name -> systemd unit (populated per scrape loop)
+_EXL3_STORES = {}  # unit name -> Exl3Store
+
+
+def _with_exl3_aliases(parsed):
+    """Map the journal bridge's exl3:* namespace onto the vLLM-shaped names
+    the generic pipeline reads, so _window_stats/_engine_series/_to_db_row
+    and the ledger consume EXL3 lanes with no per-engine branches (same shim
+    pattern as _with_sglang_aliases / _with_ds4_aliases).
+
+    Honest gaps stay absent (never fabricated): KV occupancy (no readout in
+    the engine), live queue depth (tabby logs queue retrospectively only),
+    per-position spec acceptance, HTTP status rates, preemptions.
+    request_success_total keeps its partial finish split — stated clauses
+    plus the unlabelled remainder ('?' semantics live in the bridge)."""
+    if parsed is None:
+        parsed = {"counters": {}, "gauges": {}, "histograms": {}}
+    ctr, g, h = (parsed.get("counters", {}), parsed.get("gauges", {}),
+                 parsed.get("histograms", {}))
+
+    def _copy(src, dst, table):
+        if src in table and dst not in table:
+            table[dst] = dict(table[src])
+
+    for src, dst in (
+            ("exl3:prompt_tokens_total", "vllm:prompt_tokens_total"),
+            (exl3metrics.SIGNATURE, "vllm:generation_tokens_total"),
+            ("exl3:requests_completed_total", "vllm:num_requests_total"),
+            ("exl3:prefix_cache_hits_total", "vllm:prefix_cache_hits_total"),
+            ("exl3:prefix_cache_queries_total", "vllm:prefix_cache_queries_total"),
+            ("exl3:spec_decode_accepted_total", "vllm:spec_decode_num_accepted_tokens_total"),
+            ("exl3:spec_decode_draft_total", "vllm:spec_decode_num_draft_tokens_total"),
+            ("exl3:request_success_total", "vllm:request_success_total"),
+            ("exl3:prompt_tokens_by_source_total", "vllm:prompt_tokens_by_source_total"),
+    ):
+        _copy(src, dst, ctr)
+    for src, dst in (
+            ("exl3:predict_seconds", "vllm:predicted_tokens_seconds"),
+            ("exl3:prompt_seconds", "vllm:prompt_seconds"),
+            ("exl3:num_requests_running", "vllm:num_requests_running"),
+            ("exl3:num_requests_waiting", "vllm:num_requests_waiting"),
+    ):
+        _copy(src, dst, g)
+    for src, dst in (
+            ("exl3:time_to_first_token_seconds", "vllm:time_to_first_token_seconds"),
+            ("exl3:e2e_request_latency_seconds", "vllm:e2e_request_latency_seconds"),
+            ("exl3:inter_token_latency_seconds", "vllm:inter_token_latency_seconds"),
+            ("exl3:request_queue_time_seconds", "vllm:request_queue_time_seconds"),
+            ("exl3:request_generation_tokens", "vllm:request_generation_tokens"),
+            ("exl3:request_prefill_kv_computed_tokens", "vllm:request_prefill_kv_computed_tokens"),
+            ("exl3:request_decode_time_seconds", "vllm:request_decode_time_seconds"),
+            ("exl3:request_prefill_time_seconds", "vllm:request_prefill_time_seconds"),
+    ):
+        _copy(src, dst, h)
+    return parsed
+
+def _is_ds4_sample(sample):
+    return "ds4_tokens_decoded_total" in (sample or {}).get("counters", {})
+
+
+def _is_tensorfold_sample(sample):
+    return "tensorfold:prompt_tokens_total" in (sample or {}).get("counters", {})
+
 def _is_exl3_sample(sample):
     return exl3metrics.SIGNATURE in (sample or {}).get("counters", {})
 
@@ -956,6 +1061,7 @@ def scrape_engines():
             parsed = _with_llamacpp_aliases(parsed)
             parsed = _with_sglang_aliases(parsed)
             parsed = _with_ds4_aliases(parsed)
+            parsed = _with_tensorfold_aliases(parsed)
             parsed = _with_exl3_aliases(parsed)
             st["samples"].append((time.time(), parsed))
             st["up"] = True
@@ -1637,6 +1743,25 @@ def _window_stats(st, window_s):
                 res["output_per_s_now"] = round(r_dec / r_dt, 2)
                 res["input_per_s_now"] = round(r_prm / r_dt, 2)
                 res["tokens_per_s_now"] = round((r_dec + r_prm) / r_dt, 2)
+            elif _is_tensorfold_sample(recent[-1][1]):
+                # TensorFold credits generation_tokens_total ONLY at request
+                # completion (verified 2026-10-09: 3x2s deltas read 0 during
+                # live streams; idle reads running=0 + frozen total). The
+                # in-flight tokens live in the generation_tokens_running
+                # gauge, so total+running is a monotone cumulative and its
+                # delta is the honest live rate. The plain counter delta the
+                # vLLM branch below would take reads ~0 mid-decode and spikes
+                # at completion.
+                def _tf_cum(_p):
+                    t = _c(_p, "tensorfold:generation_tokens_total")
+                    if t is None:
+                        return None
+                    return t + (_g(_p, "tensorfold:generation_tokens_running")
+                                or 0.0)
+                c0, c1 = _tf_cum(recent[0][1]), _tf_cum(recent[-1][1])
+                d = None if (c0 is None or c1 is None) else c1 - c0
+                if d is not None and d >= 0:
+                    res["output_per_s_now"] = round(d / r_dt, 2)
             else:
                 # vLLM/sglang path. MEASURED 2026-09-27 on the live brain
                 # lane, against generation_tokens_total sampled every 2s
@@ -3576,6 +3701,8 @@ def _live_backend(port, st, model_cfg):
             backend = "sglang"
         elif _is_ds4_sample(last_p):
             backend = "ds4"
+        elif _is_tensorfold_sample(last_p):
+            backend = "tensorfold"
         elif _is_exl3_sample(last_p):
             backend = "exl3"
         else:
@@ -3594,6 +3721,11 @@ def _live_backend(port, st, model_cfg):
         # while the lane is up but idle (no journal rows yet).
         if backend == "unknown" and _is_tabby_proc(proc["args"]):
             backend = "exl3"
+        # TensorFold-native takes the model path as a positional arg (no
+        # --model flag), so the scan above finds nothing. --name is its
+        # clean display identity ("Qwen3.8-Flash-Next").
+        if model_cmdline is None and "tensorfold" in " ".join(proc["args"][:2]):
+            model_cmdline = _arg(proc["args"], "--name") or None
     if backend == "unknown" and model_cfg is not None:
         # a configured engine that answered /v1/models: the id/owned_by
         # tells us the serving engine (owned_by=="sglang" is definitive)
@@ -3615,6 +3747,7 @@ _SLOT_CAP_FLAGS = {
     "vllm": ("--max-num-seqs",),
     "llama": ("--parallel",),
     "ds4": ("--max-concurrent",),
+    "tensorfold": ("--parallel",),
 }
 
 

@@ -79,6 +79,7 @@ header{display:flex;align-items:center;gap:14px;margin-bottom:12px;flex-wrap:wra
 .eback.sglang{color:var(--gf-gold);border-color:color-mix(in srgb,var(--gf-gold) 50%,transparent)}
 .eback.ds4{color:#c678dd;border-color:color-mix(in srgb,#c678dd 50%,transparent)}
 .eback.exl3{color:#56b6c2;border-color:color-mix(in srgb,#56b6c2 50%,transparent)}
+.eback.tensorfold{color:#98c379;border-color:color-mix(in srgb,#98c379 50%,transparent)}
 .eback.unknown{color:var(--gf-dim);border-color:var(--gf-edge)}
 .tmute{color:var(--gf-dim);font-size:11px}
 
@@ -770,7 +771,7 @@ function stripName(e){
   return {full:nm,short:nm.length>30?nm.slice(0,29)+'…':nm};
 }
 function chipLabel(e){
-  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang'||e.backend==='ds4'||e.backend==='exl3')?e.backend:'?';
+  var b=(e.backend==='llama'||e.backend==='vllm'||e.backend==='sglang'||e.backend==='ds4'||e.backend==='exl3'||e.backend==='tensorfold')?e.backend:'?';
   var nm=stripName(e).short;
   return b+' · '+esc(nm)+' · :'+e.port+(e.has_metrics?'':' · no metrics');
 }
