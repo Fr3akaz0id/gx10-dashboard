@@ -18,7 +18,8 @@ keys are possible as the UI evolves.
 
 `model_ledger` is keyed by a NUL-separated triple
 `model \x00 version \x00 engine`, where **engine is the backend family**
-(`vllm`, `llama`, `sglang`) and deliberately **not** `family:port`. A model
+(`vllm`, `llama`, `sglang`, `ds4`, `exl3`, `tensorfold`) and deliberately
+**not** `family:port`. A model
 whose lane moves ports stays one row with one lifetime total; the endpoint is
 tracked per-port in `model_watermarks`, `ledger` and `samples`. Model, version
 and engine family still separate rows, so two quants of the same base or two
@@ -155,7 +156,7 @@ share of samples pinned at cap (the saturation signal), Σqueued requests, and
 { "fleet": [ { "kind": "unit|docker|port", "name": "...", "label": null,
                "image": "...", "active": "active|inactive|failed",
                "enabled": "yes|no", "status": "...", "port": 8080,
-               "engine": "llama|vllm|sglang", "model": "...",
+               "engine": "llama|vllm|sglang|ds4|exl3|tensorfold", "model": "...",
                "model_short": "...", "gpu_mem_util": ..., "rss_gib": ...,
                "slot_cap": 4, "slot_running": 2, "slot_waiting": 0,
                "slot_util_pct": 50.0 } ],

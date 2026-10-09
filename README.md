@@ -87,7 +87,7 @@ and [docs/CONFIG.md](docs/CONFIG.md).
 - **Concurrency and queue.** Each lane's max in-flight request capacity is read
   live from the process (`--max-running-requests` for SGLang, `--max-num-seqs`
   for vLLM, `--parallel` for llama.cpp preferring the live `/slots` count,
-  `--max-concurrent` for ds4). The `/metrics` CONCURRENCY & QUEUE card shows
+  `--max-concurrent` for ds4, `--parallel` for TensorFold). The `/metrics` CONCURRENCY & QUEUE card shows
   concurrent requests and queue depth for the selected lane, plus occupancy
   over the window with avg-concurrency / %-at-cap / queued KPIs.
   **Per-seat tiles are drawn only for backends that have real per-seat
@@ -114,7 +114,10 @@ and [docs/CONFIG.md](docs/CONFIG.md).
   `request_prefill_kv_computed_tokens`, plus the decode/prefill time pair)
   diffed over a trailing ~20s window, so the three cards reconcile by
   construction. Backends with no such histograms (SGLang) keep the counter
-  delta. A vLLM lane that cannot be honestly measured yet (quiet, or a ring
+  delta. TensorFold credits its token counters only at request completion and
+  keeps in-flight tokens in `generation_tokens_running`, so its live rate is
+  the delta of `total + running` — a plain counter delta reads ~0 mid-decode
+  and spikes at completion. A vLLM lane that cannot be honestly measured yet (quiet, or a ring
   younger than the window right after a restart) renders `–`, never a stale 0.
 - **Config hot-reload by mtime**: changes made in `/settings` take effect on
   the next poll, no restart. Every save writes a timestamped `.bak` first and

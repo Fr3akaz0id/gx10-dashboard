@@ -715,7 +715,7 @@ def engine_logs(unit, tail=120):
 # ---------------------------------------------------------------------------
 
 SYSTEMD_SYSTEM = "/etc/systemd/system"
-_UNIT_ENGINE_HINT = re.compile(r"llama-server|llama-cli|llama-server-bench|ds4-server|vllm|/vllm|llama-cpp|sglang|ollama", re.I)
+_UNIT_ENGINE_HINT = re.compile(r"llama-server|llama-cli|llama-server-bench|ds4-server|vllm|/vllm|llama-cpp|sglang|ollama|tensorfold", re.I)
 _EXCLUDE_UNITS = {"gx10-dashboard.service"}
 
 

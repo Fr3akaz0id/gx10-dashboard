@@ -52,7 +52,7 @@ Each entry:
 
 Discovery (`/api/engines/discover`) finds candidate units/containers, filters
 to inference servers (`llama-server`, `vllm`, `sglang`, `ds4-server`,
-`ollama`, …), and annotates each with `configured` / `suggested` — you import
+`tensorfold-native`, `ollama`, …), and annotates each with `configured` / `suggested` — you import
 them from the UI instead of hand-writing entries.
 
 Engines are considered **up** if `/metrics` *or* `/health` answers 200 — a
