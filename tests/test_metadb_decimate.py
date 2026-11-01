@@ -48,9 +48,12 @@ def main():
         # small window: fewer than limit rows -> all returned, no decimation
         small = metadb.query_range(r, 8889, now - 3600, 1440)
         assert len(small) == 121, "small window should return all 121: %d" % len(small)
-        # token sums still true over full window (unaffected by decimation)
+        # token sums still true over full window (unaffected by decimation).
+        # computed_in_tokens added later (metadb.query_token_sums): no seeded
+        # prompt_cached_pct -> counts as 0% cached -> equals in_tokens.
         t = metadb.query_token_sums(r, 8889, now - 604800)
-        assert t == {"in_tokens": 50000, "out_tokens": 25000}, t
+        assert t == {"in_tokens": 50000, "out_tokens": 25000,
+                     "computed_in_tokens": 50000}, t
         r.close()
         print("OK metadb decimation: 7d->%d pts (span %.1fh), gpu->%d (span %.1fh), small->%d, sums=%s"
               % (len(rows), span/3600, len(g), gspan/3600, len(small), t))

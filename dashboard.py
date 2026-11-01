@@ -3813,8 +3813,18 @@ def _model_version(port, st, backend):
         return None
     m = _arg(proc["args"], "--model") or _arg(proc["args"], "-m") \
         or _arg(proc["args"], "--model-path")
+    if not m and backend == "tensorfold":
+        # TensorFold-native: model path is the first positional after "serve"
+        # (flags start with '-'; --name is the display name, not the artifact).
+        m = next((a for a in proc["args"][1:]
+                  if a.startswith("/") or a.startswith("./")), None)
     if not m:
         return None
+    # HF hub snapshot layout (…/models--org--name/snapshots/<rev>): the leaf
+    # commit SHA IS the version. Must precede the isdir recipe-dir heuristic,
+    # whose dirname() would read 'snapshots' — the storage layout, not a version.
+    if os.path.basename(os.path.dirname(m.rstrip("/"))) == "snapshots":
+        return _strip_shards(_short_model(os.path.basename(m)))
     if os.path.isfile(m):
         return _strip_shards(_short_model(os.path.basename(m)))
     if os.path.isdir(m):
@@ -3851,11 +3861,18 @@ def _model_identity(port, st):
     `key` is NUL-joined — model names never contain NULs, so collisions are
     impossible. Computed every scrape so a model/quant/engine swap is
     attributed to the right row."""
+    # _live_backend's model_cmdline beats st's: the poll loop only fills it
+    # from --model/-m/--model-path, so a TensorFold proc (POSITIONAL model
+    # path, display name in --name) reads None there and the base collapses
+    # to basename(config model path) — an HF snapshot dir, i.e. a bare commit
+    # SHA on the TOKENS BY MODEL card. _live_backend already resolves the
+    # --name fallback for tensorfold.
+    backend, mcmd = _live_backend(port, st, None)
     base = _strip_shards(_short_model(st.get("model_live")
+                                      or mcmd
                                       or st.get("model_cmdline")
                                       or st.get("model")
                                       or f"port {port}"))
-    backend = _live_backend(port, st, None)[0]
     engine = backend
     version = _model_version(port, st, backend)
     return {"key": "\u0000".join([base, version or "?", engine]),
