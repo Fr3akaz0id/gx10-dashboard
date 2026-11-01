@@ -1,6 +1,6 @@
 """TensorFold lane identity: NAME not SHA on the ledger.
 
-Why: TOKENS BY MODEL rendered a bare commit SHA ("b9ce18a6887e...") for the
+Why: TOKENS BY MODEL rendered a bare commit SHA ("deadbeef...") for the
 TensorFold lane. TensorFold-native takes the model path as a POSITIONAL arg
 (no --model flag) and keeps the display name in --name. The poll loop only
 fills st["model_cmdline"] from --model/-m/--model-path, so _model_identity
@@ -23,7 +23,7 @@ import _bootstrap  # noqa: F401
 
 import dashboard
 
-REV = "b9ce18a6887e18c089fdea8509a33e63429a3300"
+REV = "a" * 40  # any 40-hex snapshot rev; the value is opaque to the test
 SNAP = "/opt/models/hf/hub/models--acme--BigModel-FP4/snapshots/" + REV
 ARGS = ["tensorfold-native", "serve", SNAP, "--name", "BigModel-FP4",
         "--host", "0.0.0.0", "--port", "8888", "--context", "262144",
