@@ -69,6 +69,15 @@ class TestTensorfoldIdentity(unittest.TestCase):
         self.assertNotEqual(a["key"], b["key"],
                             "a new snapshot rev is a new version -> new row")
 
+    def test_model_short_hf_snapshot(self):
+        """Engines-page short name: repo dir, not the snapshot SHA leaf."""
+        self.assertEqual(dashboard._model_short(SNAP), "BigModel-FP4")
+        # plain paths keep the basename behaviour
+        self.assertEqual(dashboard._model_short("/opt/models/gguf/X-Q4_K_M.gguf"),
+                         "X-Q4_K_M.gguf")
+        self.assertIsNone(dashboard._model_short(None))
+        self.assertIsNone(dashboard._model_short(""))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

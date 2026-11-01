@@ -966,6 +966,20 @@ def _short_model(name):
     return base
 
 
+def _model_short(path):
+    """Engines-page short name. Basename, EXCEPT the HF hub snapshot layout
+    (models--org--Name/snapshots/<rev>) where the leaf is a commit SHA, not a
+    name — the human-meaningful segment is the repo dir ('Name')."""
+    p = str(path or "").rstrip("/")
+    if not p:
+        return None
+    parts = p.split("/")
+    if len(parts) >= 3 and parts[-2] == "snapshots" and parts[-3].startswith("models--"):
+        seg = parts[-3].split("--")
+        return seg[-1] if len(seg) >= 3 else seg[1]
+    return parts[-1]
+
+
 def scrape_engines():
     """Scrape /metrics from every configured engine port. Per-port
     try/except + 1.5s timeout — failures never break the main collect loop.
@@ -2887,8 +2901,7 @@ def engines_fleet():
                 "rss_gib": rss_gib,
                 "engine": live if live != "unknown" else sniffed,
                 "model": model_path,
-                "model_short": ((model_path or "").rsplit("/", 1)[-1]
-                                if model_path else None),
+                "model_short": _model_short(model_path),
                 # host path is the best answer when it exists; container
                 # engines have none, so ask the engine (or config) what it
                 # serves instead of rendering an em-dash on every card.
@@ -2945,7 +2958,7 @@ def engines_fleet():
                 "port": port,
                 "engine": live,
                 "model": rec.get("model") if isinstance(rec, dict) else None,
-                "model_short": (rec.get("model") or "").rsplit("/", 1)[-1] if isinstance(rec, dict) and rec.get("model") else None,
+                "model_short": _model_short(rec.get("model")) if isinstance(rec, dict) else None,
                 "gpu_mem_util": gmu,
                 "rss_gib": None,
                 **_slot_util(st),
@@ -3000,7 +3013,7 @@ def engines_fleet():
                 "port": port,
                 "engine": backend or "unknown",
                 "model": model,
-                "model_short": (model or "").rsplit("/", 1)[-1] if model else None,
+                "model_short": _model_short(model),
                 "gpu_mem_util": None,
                 "rss_gib": None,
                 **_slot_util(st),
